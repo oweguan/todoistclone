@@ -1,0 +1,23 @@
+{
+  "name": "Brisa — tus tareas, en calma",
+  "short_name": "Brisa",
+  "description": "Gestor personal de tareas local con captura inteligente por voz.",
+  "start_url": "/",
+  "id": "/",
+  "scope": "/",
+  "display": "standalone",
+  "display_override": ["window-controls-overlay", "standalone"],
+  "background_color": "#f8f7f2",
+  "theme_color": "#526d5a",
+  "lang": "es",
+  "orientation": "portrait-primary",
+  "categories": ["productivity", "utilities"],
+  "shortcuts": [
+    { "name": "Descarga mental", "short_name": "Hablar", "url": "/?action=ramble", "icons": [{ "src": "/brisa-192.png", "sizes": "192x192" }] },
+    { "name": "Añadir tarea", "short_name": "Añadir", "url": "/?action=add", "icons": [{ "src": "/brisa-192.png", "sizes": "192x192" }] }
+  ],
+  "icons": [
+    { "src": "/brisa-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any maskable" },
+    { "src": "/brisa-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" }
+  ]
+}
