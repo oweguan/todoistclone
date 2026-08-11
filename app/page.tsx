@@ -18,6 +18,9 @@ type Task = {
   completed: boolean;
   createdAt: string;
   completedAt?: string;
+  calendarRequested?: boolean;
+  calendarOpenedAt?: string;
+  durationMinutes?: number;
 };
 
 const STORAGE_KEY = "brisa.tasks.v1";
@@ -59,6 +62,37 @@ export function addDaysISO(days: number) {
   d.setDate(d.getDate() + days);
   d.setMinutes(d.getMinutes() - d.getTimezoneOffset());
   return d.toISOString().slice(0, 10);
+}
+
+function addDaysToISO(date: string, days: number) {
+  const value = new Date(`${date}T12:00:00`);
+  value.setDate(value.getDate() + days);
+  value.setMinutes(value.getMinutes() - value.getTimezoneOffset());
+  return value.toISOString().slice(0, 10);
+}
+
+function compactCalendarDate(date: Date) {
+  const pad = (value: number) => String(value).padStart(2, "0");
+  return `${date.getFullYear()}${pad(date.getMonth() + 1)}${pad(date.getDate())}T${pad(date.getHours())}${pad(date.getMinutes())}00`;
+}
+
+export function googleCalendarUrl(task: Task) {
+  if (!task.due) return "";
+  let dates: string;
+  if (task.time) {
+    const start = new Date(`${task.due}T${task.time}:00`);
+    const end = new Date(start.getTime() + (task.durationMinutes || 30) * 60_000);
+    dates = `${compactCalendarDate(start)}/${compactCalendarDate(end)}`;
+  } else {
+    dates = `${task.due.replaceAll("-", "")}/${addDaysToISO(task.due, 1).replaceAll("-", "")}`;
+  }
+  const params = new URLSearchParams({
+    action: "TEMPLATE",
+    text: task.title,
+    dates,
+    details: [task.description, `Proyecto: ${task.project}`, task.labels.length ? `Etiquetas: ${task.labels.map((label) => `@${label}`).join(" ")}` : ""].filter(Boolean).join("\n"),
+  });
+  return `https://calendar.google.com/calendar/render?${params.toString()}`;
 }
 
 function uid() {
@@ -198,6 +232,7 @@ export function parseThoughts(input: string): Task[] {
     const labels = [...original.matchAll(/@([\p{L}\d_-]+)/gu)].map((match) => match[1]);
     const recurringMatch = original.match(/\b(cada\s+(?:día|semana|mes|lunes|martes|miércoles|jueves|viernes|sábado|domingo)|todos?\s+los?\s+\p{L}+)\b/iu);
     const priority: Priority = parsePriority(original) || 4;
+    const calendarRequested = /(?:a(?:ñ|n)[aá]d(?:e|elo|ela)|agrega|guarda|pon)(?:r)?(?:lo|la)?\s+(?:en|al)\s+(?:mi\s+)?(?:google\s+)?calendario|\ben\s+(?:mi\s+)?(?:google\s+)?calendar\b/i.test(original);
 
     let title = correctLeadingAction(original)
       .replace(/^(?:necesito|tengo que|quiero|hay que|apunta|anota|recuérdame)\s+/i, "")
@@ -214,6 +249,8 @@ export function parseThoughts(input: string): Task[] {
       .replace(/\b(?:con\s+)?prioridad\s+(?:alta|media|baja|uno|dos|tres|1|2|3)\b|\bp[1-4]\b/gi, "")
       .replace(/\b(?:en|para|al)\s+(?:el\s+)?proyecto\s+[“\"]?[^,.@]+[”\"]?/gi, "")
       .replace(/\b(?:cada\s+(?:día|semana|mes|lunes|martes|miércoles|jueves|viernes|sábado|domingo)|todos?\s+los?\s+\p{L}+)\b/giu, "")
+      .replace(/\b(?:y\s+)?(?:a(?:ñ|n)[aá]d(?:e|elo|ela)|agrega|guarda|pon)(?:r)?(?:lo|la)?\s+(?:en|al)\s+(?:mi\s+)?(?:google\s+)?calendario\b/giu, "")
+      .replace(/\ben\s+(?:mi\s+)?google\s+calendar\b/giu, "")
       .replace(/@[\p{L}\d_-]+/gu, "")
       .replace(/\s{2,}/g, " ")
       .replace(/^[,\s]+|[,\s]+$/g, "");
@@ -238,6 +275,8 @@ export function parseThoughts(input: string): Task[] {
       labels,
       completed: false,
       createdAt: new Date().toISOString(),
+      calendarRequested,
+      durationMinutes: 30,
     });
   }
   return tasks;
@@ -264,6 +303,7 @@ export default function Home() {
   const [isStandalone, setIsStandalone] = useState(false);
   const [showInstallHelp, setShowInstallHelp] = useState(false);
   const [showOrganizer, setShowOrganizer] = useState(false);
+  const [showCalendar, setShowCalendar] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [selectedProject, setSelectedProject] = useState<string | null>(null);
   const [selectedLabel, setSelectedLabel] = useState<string | null>(null);
@@ -309,7 +349,7 @@ export default function Home() {
       } catch { /* keep starter tasks */ }
     }
     setHydrated(true);
-    if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=11", { updateViaCache: "none" }).then((registration) => registration.update()).catch(() => undefined);
+    if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=12", { updateViaCache: "none" }).then((registration) => registration.update()).catch(() => undefined);
     const action = new URLSearchParams(window.location.search).get("action");
     if (action === "ramble") window.setTimeout(openRamble, 0);
     if (action === "add") window.setTimeout(() => setShowComposer(true), 0);
@@ -341,6 +381,7 @@ export default function Home() {
   }, [tasks, view, searchQuery, selectedProject, selectedLabel]);
 
   const availableLabels = useMemo(() => Array.from(new Set(tasks.flatMap((task) => task.labels))).sort((a, b) => a.localeCompare(b, "es")), [tasks]);
+  const calendarTasks = useMemo(() => tasks.filter((task) => !task.completed && task.due).sort((a, b) => `${a.due}${a.time || ""}`.localeCompare(`${b.due}${b.time || ""}`)), [tasks]);
 
   const counts = {
     inbox: tasks.filter((task) => !task.completed && task.project === "Bandeja de entrada").length,
@@ -384,6 +425,14 @@ export default function Home() {
     setTasks((current) => current.filter((task) => task.id !== id));
     setEditingTaskId(null);
     flash("Tarea eliminada");
+  }
+
+  function openInGoogleCalendar(task: Task) {
+    const url = googleCalendarUrl(task);
+    if (!url) { flash("Añade una fecha antes de abrir Calendar"); return; }
+    window.open(url, "_blank", "noopener,noreferrer");
+    updateTask(task.id, { calendarRequested: true, calendarOpenedAt: new Date().toISOString() });
+    flash("Evento preparado; confirma Guardar en Google Calendar");
   }
 
   function clearOrganizationFilters() {
@@ -634,11 +683,15 @@ export default function Home() {
 
   function confirmRamble() {
     if (!preview.length) return;
-    setTasks((current) => [...current, ...preview]);
+    const requested = preview.filter((task) => task.calendarRequested && task.due);
+    const firstRequested = requested[0];
+    const savedPreview = preview.map((task) => task.id === firstRequested?.id ? { ...task, calendarOpenedAt: new Date().toISOString() } : task);
+    if (firstRequested) window.open(googleCalendarUrl(firstRequested), "_blank", "noopener,noreferrer");
+    setTasks((current) => [...current, ...savedPreview]);
     setProjects((current) => Array.from(new Set([...current, ...preview.map((task) => task.project).filter(Boolean)])));
     setShowRamble(false);
     setView("inbox");
-    flash(`${preview.length} ${preview.length === 1 ? "tarea añadida" : "tareas añadidas"}`);
+    flash(firstRequested ? "Tarea añadida; confirma el evento en Calendar" : `${preview.length} ${preview.length === 1 ? "tarea añadida" : "tareas añadidas"}`);
   }
 
   function exportBackup() {
@@ -683,6 +736,7 @@ export default function Home() {
           <div className="overflow-menu">
             {!isStandalone && <button onClick={installAndroidApp}><span>⇩</span> Instalar en Android</button>}
             <button onClick={() => { setShowOrganizer(true); setShowMenu(false); }}><span>⌕</span> Organizar y buscar</button>
+            <button onClick={() => { setShowCalendar(true); setShowMenu(false); }}><span>▦</span> Google Calendar</button>
             <p className="menu-section-title">Proyectos</p>
             {projects.map((project) => <button className={selectedProject === project ? "menu-project active" : "menu-project"} key={project} onClick={() => openProject(project)}><i /><span>{project}</span><b>{tasks.filter((task) => !task.completed && task.project === project).length}</b></button>)}
             <div className="menu-divider" />
@@ -713,6 +767,7 @@ export default function Home() {
                 <div className="task-meta">
                   {task.due && <span className={task.due === todayISO() ? "due-today" : ""}>◷ {relativeDate(task.due)}{task.time ? ` · ${task.time}` : ""}</span>}
                   {task.recurring && <span>↻ {task.recurring}</span>}
+                  {task.due && <button className={`calendar-chip ${task.calendarOpenedAt ? "opened" : ""}`} onClick={() => openInGoogleCalendar(task)}>▦ {task.calendarOpenedAt ? "Abrir de nuevo" : task.calendarRequested ? "Añadir a Calendar" : "Calendar"}</button>}
                   <span className="project-dot"><i />{task.project}</span>
                   {task.labels.map((label) => <span key={label}>@{label}</span>)}
                 </div>
@@ -774,6 +829,21 @@ export default function Home() {
         </div>
       )}
 
+      {showCalendar && (
+        <div className="sheet-backdrop calendar-backdrop" onMouseDown={(event) => event.target === event.currentTarget && setShowCalendar(false)}>
+          <section className="calendar-sheet sheet" aria-label="Tareas para Google Calendar">
+            <div className="sheet-handle" />
+            <div className="calendar-heading"><div><p>Planificación</p><h2>Google Calendar</h2></div><button onClick={() => setShowCalendar(false)} aria-label="Cerrar">×</button></div>
+            <div className="calendar-explainer"><span>▦</span><p>Brisa abre cada evento con el nombre, la fecha y la hora preparados. Solo tendrás que pulsar <strong>Guardar</strong> en Google Calendar.</p></div>
+            <div className="calendar-list">
+              {calendarTasks.map((task) => <article key={task.id}><div><h3>{task.title}</h3><p>{relativeDate(task.due)}{task.time ? ` · ${task.time}` : " · Todo el día"} · {task.project}</p></div><button className={task.calendarOpenedAt ? "opened" : ""} onClick={() => openInGoogleCalendar(task)}>{task.calendarOpenedAt ? "Abrir de nuevo" : "Añadir"}</button></article>)}
+              {!calendarTasks.length && <div className="calendar-empty"><span>◷</span><h3>No hay tareas fechadas</h3><p>Añade una fecha a una tarea y aparecerá aquí.</p></div>}
+            </div>
+            <p className="calendar-footnote">La sincronización automática llegará al conectar tu cuenta de Google. Por ahora, nada se comparte sin que tú lo confirmes.</p>
+          </section>
+        </div>
+      )}
+
       {showComposer && (
         <div className="sheet-backdrop" onMouseDown={(event) => event.target === event.currentTarget && setShowComposer(false)}>
           <section className="composer sheet">
@@ -801,8 +871,10 @@ export default function Home() {
                 <label>Proyecto<input list="saved-task-projects" value={task.project} onChange={(event) => updateTask(task.id, { project: event.target.value || "Bandeja de entrada" })} /></label>
                 <label className="labels-field">Etiquetas<input value={task.labels.join(", ")} placeholder="casa, llamadas, urgente" onChange={(event) => updateTask(task.id, { labels: event.target.value.split(",").map((label) => label.trim().replace(/^@/, "")).filter(Boolean) })} /></label>
               </div>
+              <div className={`calendar-option ${task.calendarRequested ? "selected" : ""}`}><div><span>▦</span><div><strong>Google Calendar</strong><small>{task.due ? "Abrir el evento preparado al guardar" : "Añade una fecha para activar esta opción"}</small></div></div><label className="switch"><input type="checkbox" checked={Boolean(task.calendarRequested)} disabled={!task.due} onChange={(event) => updateTask(task.id, { calendarRequested: event.target.checked })} /><i /></label></div>
+              {task.calendarRequested && task.due && task.time && <label className="duration-field">Duración del evento<select value={task.durationMinutes || 30} onChange={(event) => updateTask(task.id, { durationMinutes: Number(event.target.value) })}><option value="15">15 minutos</option><option value="30">30 minutos</option><option value="60">1 hora</option><option value="90">1 hora y media</option><option value="120">2 horas</option></select></label>}
               <datalist id="saved-task-projects">{projects.map((project) => <option key={project} value={project} />)}</datalist>
-              <div className="editor-actions"><button className="delete-task" onClick={() => deleteTask(task.id)}>Eliminar tarea</button><button className="confirm-btn" onClick={() => { if (task.project.trim()) setProjects((current) => current.includes(task.project.trim()) ? current : [...current, task.project.trim()]); setEditingTaskId(null); flash("Cambios guardados"); }}>Guardar cambios</button></div>
+              <div className="editor-actions"><button className="delete-task" onClick={() => deleteTask(task.id)}>Eliminar tarea</button><button className="confirm-btn" onClick={() => { if (task.project.trim()) setProjects((current) => current.includes(task.project.trim()) ? current : [...current, task.project.trim()]); if (task.calendarRequested && task.due) openInGoogleCalendar(task); setEditingTaskId(null); if (!task.calendarRequested) flash("Cambios guardados"); }}>Guardar cambios</button></div>
             </section>
           </div>
         );
@@ -844,6 +916,7 @@ export default function Home() {
                     <label>Prioridad<select value={task.priority} onChange={(event) => updatePreviewTask(task.id, { priority: Number(event.target.value) as Priority })}><option value="4">Normal</option><option value="1">Alta · P1</option><option value="2">Media · P2</option><option value="3">Baja · P3</option></select></label>
                     <label className="project-field">Proyecto<input list="brisa-projects" value={task.project} onChange={(event) => updatePreviewTask(task.id, { project: event.target.value || "Bandeja de entrada" })} /></label>
                     <label className="project-field">Etiquetas<input value={task.labels.join(", ")} placeholder="casa, compras" onChange={(event) => updatePreviewTask(task.id, { labels: event.target.value.split(",").map((label) => label.trim().replace(/^@/, "")).filter(Boolean) })} /></label>
+                    <label className="preview-calendar project-field"><span>Google Calendar</span><select value={task.calendarRequested ? "yes" : "no"} disabled={!task.due} onChange={(event) => updatePreviewTask(task.id, { calendarRequested: event.target.value === "yes" })}><option value="no">No añadir</option><option value="yes">Abrir al guardar</option></select></label>
                     <button className="done-editing" onClick={() => setEditingPreviewId(null)}>Listo</button>
                   </div>
                 )}

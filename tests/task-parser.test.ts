@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { parseThoughts, todayISO, addDaysISO } from "../app/page";
+import { parseThoughts, todayISO, addDaysISO, googleCalendarUrl } from "../app/page";
 
 test("separa varias tareas y comprende fechas, horas y prioridades", () => {
   const tasks = parseThoughts("Mañana llamar a Ana a las cinco de la tarde prioridad alta y comprar pan esta tarde");
@@ -55,4 +55,13 @@ test("corrige la transcripción observada de un verbo y un nombre pegado", () =>
   assert.equal(tasks[0].title, "Revisar el lanzamiento de Lázaro");
   assert.equal(tasks[0].due, todayISO());
   assert.equal(tasks[0].time, "18:00");
+});
+
+test("reconoce una petición para Google Calendar sin ensuciar el título", () => {
+  const tasks = parseThoughts("Revisar el lanzamiento de Lázaro mañana a las 18 horas y añádelo al calendario");
+  assert.equal(tasks.length, 1);
+  assert.equal(tasks[0].title, "Revisar el lanzamiento de Lázaro");
+  assert.equal(tasks[0].calendarRequested, true);
+  assert.match(googleCalendarUrl(tasks[0]), /^https:\/\/calendar\.google\.com\/calendar\/render\?/);
+  assert.match(googleCalendarUrl(tasks[0]), /text=Revisar\+el\+lanzamiento\+de\+L%C3%A1zaro/);
 });

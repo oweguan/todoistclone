@@ -55,6 +55,10 @@ test("keeps tasks local and supports voice and portable backups", async () => {
   assert.match(page, /Etiquetas/);
   assert.match(page, /beforeinstallprompt/);
   assert.match(page, /Instalar en Android/);
+  assert.match(page, /googleCalendarUrl/);
+  assert.match(page, /Google Calendar/);
+  assert.match(page, /calendarRequested/);
+  assert.match(page, /Duración del evento/);
   assert.match(page, /function openProject/);
   assert.match(page, /Proyecto creado y abierto/);
   assert.match(page, /Se añadirá a/);
