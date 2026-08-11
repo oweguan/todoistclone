@@ -24,9 +24,10 @@ test("renders Brisa with its essential mobile flows", async () => {
 });
 
 test("keeps tasks local and supports voice and portable backups", async () => {
-  const [page, groqRoute, manifest, serviceWorker] = await Promise.all([
+  const [page, groqRoute, googleConfigRoute, manifest, serviceWorker] = await Promise.all([
     readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/api/transcribe/route.ts", import.meta.url), "utf8"),
+    readFile(new URL("../app/api/google-config/route.ts", import.meta.url), "utf8"),
     readFile(new URL("../public/manifest.webmanifest", import.meta.url), "utf8"),
     readFile(new URL("../public/sw.js", import.meta.url), "utf8"),
   ]);
@@ -59,6 +60,12 @@ test("keeps tasks local and supports voice and portable backups", async () => {
   assert.match(page, /Google Calendar/);
   assert.match(page, /calendarRequested/);
   assert.match(page, /Duración del evento/);
+  assert.match(page, /calendar\.events\.owned/);
+  assert.match(page, /www\.googleapis\.com\/calendar\/v3/);
+  assert.match(page, /calendarEventId/);
+  assert.match(page, /Google Calendar conectado/);
+  assert.doesNotMatch(page, /\.apps\.googleusercontent\.com/);
+  assert.match(googleConfigRoute, /process\.env\.GOOGLE_CLIENT_ID/);
   assert.match(page, /function openProject/);
   assert.match(page, /Proyecto creado y abierto/);
   assert.match(page, /Se añadirá a/);

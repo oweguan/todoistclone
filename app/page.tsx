@@ -5,6 +5,13 @@ import { ChangeEvent, useEffect, useMemo, useRef, useState } from "react";
 type View = "inbox" | "today" | "upcoming" | "completed";
 type Priority = 1 | 2 | 3 | 4;
 type InstallPromptEvent = Event & { prompt: () => Promise<void>; userChoice: Promise<{ outcome: "accepted" | "dismissed" }> };
+type GoogleTokenResponse = { access_token?: string; expires_in?: number; error?: string; error_description?: string };
+type GoogleTokenClient = { callback: (response: GoogleTokenResponse) => void; requestAccessToken: (options?: { prompt?: string }) => void };
+declare global {
+  interface Window {
+    google?: { accounts: { oauth2: { initTokenClient: (options: { client_id: string; scope: string; callback: (response: GoogleTokenResponse) => void }) => GoogleTokenClient; revoke: (token: string, callback?: () => void) => void } } };
+  }
+}
 type Task = {
   id: string;
   title: string;
@@ -21,6 +28,9 @@ type Task = {
   calendarRequested?: boolean;
   calendarOpenedAt?: string;
   durationMinutes?: number;
+  calendarEventId?: string;
+  calendarSyncedAt?: string;
+  calendarSyncState?: "pending" | "synced" | "error";
 };
 
 const STORAGE_KEY = "brisa.tasks.v1";
@@ -93,6 +103,17 @@ export function googleCalendarUrl(task: Task) {
     details: [task.description, `Proyecto: ${task.project}`, task.labels.length ? `Etiquetas: ${task.labels.map((label) => `@${label}`).join(" ")}` : ""].filter(Boolean).join("\n"),
   });
   return `https://calendar.google.com/calendar/render?${params.toString()}`;
+}
+
+export function googleCalendarEvent(task: Task) {
+  if (!task.due) return null;
+  const description = [task.description, `Proyecto de Brisa: ${task.project}`, task.labels.length ? `Etiquetas: ${task.labels.map((label) => `@${label}`).join(" ")}` : ""].filter(Boolean).join("\n");
+  if (!task.time) return { summary: task.title, description, start: { date: task.due }, end: { date: addDaysToISO(task.due, 1) } };
+  const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone || "Europe/Madrid";
+  const start = new Date(`${task.due}T${task.time}:00`);
+  const end = new Date(start.getTime() + (task.durationMinutes || 30) * 60_000);
+  const localDateTime = (date: Date) => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}T${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}:00`;
+  return { summary: task.title, description, start: { dateTime: localDateTime(start), timeZone }, end: { dateTime: localDateTime(end), timeZone } };
 }
 
 function uid() {
@@ -304,6 +325,10 @@ export default function Home() {
   const [showInstallHelp, setShowInstallHelp] = useState(false);
   const [showOrganizer, setShowOrganizer] = useState(false);
   const [showCalendar, setShowCalendar] = useState(false);
+  const [googleConfigured, setGoogleConfigured] = useState<boolean | null>(null);
+  const [googleConnected, setGoogleConnected] = useState(false);
+  const [googleBusyTaskId, setGoogleBusyTaskId] = useState<string | null>(null);
+  const [googleMessage, setGoogleMessage] = useState("");
   const [searchQuery, setSearchQuery] = useState("");
   const [selectedProject, setSelectedProject] = useState<string | null>(null);
   const [selectedLabel, setSelectedLabel] = useState<string | null>(null);
@@ -327,6 +352,9 @@ export default function Home() {
   const pcmChunksRef = useRef<Float32Array[]>([]);
   const sampleRateRef = useRef(48000);
   const transcriberRef = useRef<Promise<any> | null>(null);
+  const googleClientIdRef = useRef("");
+  const googleTokenClientRef = useRef<GoogleTokenClient | null>(null);
+  const googleTokenRef = useRef<{ token: string; expiresAt: number } | null>(null);
 
   useEffect(() => {
     const standalone = window.matchMedia("(display-mode: standalone)").matches;
@@ -349,10 +377,11 @@ export default function Home() {
       } catch { /* keep starter tasks */ }
     }
     setHydrated(true);
-    if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=12", { updateViaCache: "none" }).then((registration) => registration.update()).catch(() => undefined);
+    if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=13", { updateViaCache: "none" }).then((registration) => registration.update()).catch(() => undefined);
     const action = new URLSearchParams(window.location.search).get("action");
     if (action === "ramble") window.setTimeout(openRamble, 0);
     if (action === "add") window.setTimeout(() => setShowComposer(true), 0);
+    fetch("/api/google-config", { cache: "no-store" }).then((response) => response.json()).then((config) => { setGoogleConfigured(Boolean(config.configured)); googleClientIdRef.current = config.clientId || ""; }).catch(() => setGoogleConfigured(false));
     return () => window.removeEventListener("beforeinstallprompt", captureInstallPrompt);
   }, []);
 
@@ -413,15 +442,108 @@ export default function Home() {
     setInstallPrompt(null);
   }
 
-  function toggleTask(id: string) {
-    setTasks((current) => current.map((task) => task.id === id ? { ...task, completed: !task.completed, completedAt: !task.completed ? new Date().toISOString() : undefined } : task));
+  function loadGoogleIdentity() {
+    if (window.google?.accounts?.oauth2) return Promise.resolve();
+    return new Promise<void>((resolve, reject) => {
+      const existing = document.querySelector<HTMLScriptElement>('script[data-brisa-google="true"]');
+      if (existing) { existing.addEventListener("load", () => resolve(), { once: true }); existing.addEventListener("error", () => reject(new Error("Google no respondió")), { once: true }); return; }
+      const script = document.createElement("script");
+      script.src = "https://accounts.google.com/gsi/client";
+      script.async = true;
+      script.defer = true;
+      script.dataset.brisaGoogle = "true";
+      script.onload = () => resolve();
+      script.onerror = () => reject(new Error("Google no respondió"));
+      document.head.appendChild(script);
+    });
+  }
+
+  async function getGoogleToken() {
+    const cached = googleTokenRef.current;
+    if (cached && cached.expiresAt > Date.now() + 60_000) return cached.token;
+    if (!googleClientIdRef.current) throw new Error("La conexión con Google aún no está configurada");
+    await loadGoogleIdentity();
+    return new Promise<string>((resolve, reject) => {
+      const callback = (response: GoogleTokenResponse) => {
+        if (!response.access_token) { reject(new Error(response.error_description || "No se autorizó Google Calendar")); return; }
+        const value = { token: response.access_token, expiresAt: Date.now() + (response.expires_in || 3600) * 1000 };
+        googleTokenRef.current = value;
+        setGoogleConnected(true);
+        setGoogleMessage("Google Calendar conectado durante esta sesión");
+        resolve(value.token);
+      };
+      googleTokenClientRef.current = window.google!.accounts.oauth2.initTokenClient({ client_id: googleClientIdRef.current, scope: "https://www.googleapis.com/auth/calendar.events.owned", callback });
+      googleTokenClientRef.current.requestAccessToken({ prompt: googleConnected ? "" : "consent" });
+    });
+  }
+
+  async function connectGoogle() {
+    setGoogleMessage("");
+    try { await getGoogleToken(); } catch (error) { setGoogleConnected(false); setGoogleMessage(error instanceof Error ? error.message : "No se pudo conectar con Google"); }
+  }
+
+  function disconnectGoogle() {
+    const token = googleTokenRef.current?.token;
+    if (token && window.google?.accounts.oauth2) window.google.accounts.oauth2.revoke(token);
+    googleTokenRef.current = null;
+    setGoogleConnected(false);
+    setGoogleMessage("Cuenta desconectada de este dispositivo");
+  }
+
+  async function syncTaskWithGoogle(task: Task) {
+    const event = googleCalendarEvent(task);
+    if (!event) { flash("Añade una fecha antes de sincronizar"); return false; }
+    setGoogleBusyTaskId(task.id);
+    setGoogleMessage("");
+    try {
+      const token = await getGoogleToken();
+      const eventUrl = task.calendarEventId ? `https://www.googleapis.com/calendar/v3/calendars/primary/events/${encodeURIComponent(task.calendarEventId)}` : "https://www.googleapis.com/calendar/v3/calendars/primary/events";
+      const response = await fetch(eventUrl, { method: task.calendarEventId ? "PATCH" : "POST", headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }, body: JSON.stringify(event) });
+      if (!response.ok) { if (response.status === 401) { googleTokenRef.current = null; setGoogleConnected(false); } throw new Error("Google Calendar no pudo guardar el evento"); }
+      const saved = await response.json();
+      updateTask(task.id, { calendarRequested: true, calendarEventId: saved.id || task.calendarEventId, calendarSyncedAt: new Date().toISOString(), calendarSyncState: "synced" });
+      setGoogleMessage(task.calendarEventId ? "Evento actualizado en Google Calendar" : "Evento creado en Google Calendar");
+      flash(task.calendarEventId ? "Evento actualizado en Calendar" : "Evento creado en Calendar");
+      return true;
+    } catch (error) {
+      updateTask(task.id, { calendarSyncState: "error" });
+      setGoogleMessage(error instanceof Error ? error.message : "No se pudo sincronizar");
+      return false;
+    } finally { setGoogleBusyTaskId(null); }
+  }
+
+  async function removeGoogleEvent(task: Task) {
+    if (!task.calendarEventId) return true;
+    try {
+      const token = await getGoogleToken();
+      const response = await fetch(`https://www.googleapis.com/calendar/v3/calendars/primary/events/${encodeURIComponent(task.calendarEventId)}`, { method: "DELETE", headers: { Authorization: `Bearer ${token}` } });
+      if (!response.ok && response.status !== 404 && response.status !== 410) throw new Error("Google Calendar no pudo eliminar el evento");
+      return true;
+    } catch (error) { setGoogleMessage(error instanceof Error ? error.message : "No se pudo eliminar el evento"); return false; }
+  }
+
+  async function toggleTask(id: string) {
+    const task = tasks.find((item) => item.id === id);
+    if (!task) return;
+    const completing = !task.completed;
+    if (completing && task.calendarEventId) {
+      setGoogleBusyTaskId(id);
+      const removed = await removeGoogleEvent(task);
+      setGoogleBusyTaskId(null);
+      if (!removed) { flash("Conecta Google para retirar el evento"); return; }
+    }
+    setTasks((current) => current.map((item) => item.id === id ? { ...item, completed: completing, completedAt: completing ? new Date().toISOString() : undefined, ...(completing && item.calendarEventId ? { calendarEventId: undefined, calendarSyncedAt: undefined, calendarSyncState: undefined } : {}), ...(!completing && item.calendarRequested ? { calendarSyncState: "pending" as const } : {}) } : item));
+    if (completing && task.calendarEventId) flash("Tarea completada y evento retirado");
   }
 
   function updateTask(id: string, changes: Partial<Task>) {
-    setTasks((current) => current.map((task) => task.id === id ? { ...task, ...changes } : task));
+    const syncFields: Array<keyof Task> = ["title", "description", "due", "time", "durationMinutes", "recurring"];
+    setTasks((current) => current.map((task) => task.id === id ? { ...task, ...changes, ...(task.calendarEventId && syncFields.some((field) => field in changes) ? { calendarSyncState: "pending" as const } : {}) } : task));
   }
 
-  function deleteTask(id: string) {
+  async function deleteTask(id: string) {
+    const task = tasks.find((item) => item.id === id);
+    if (task?.calendarEventId && !(await removeGoogleEvent(task))) { flash("No eliminé la tarea: falta borrar su evento"); return; }
     setTasks((current) => current.filter((task) => task.id !== id));
     setEditingTaskId(null);
     flash("Tarea eliminada");
@@ -433,6 +555,18 @@ export default function Home() {
     window.open(url, "_blank", "noopener,noreferrer");
     updateTask(task.id, { calendarRequested: true, calendarOpenedAt: new Date().toISOString() });
     flash("Evento preparado; confirma Guardar en Google Calendar");
+  }
+
+  function handleCalendarAction(task: Task) {
+    if (googleConfigured) void syncTaskWithGoogle(task);
+    else openInGoogleCalendar(task);
+  }
+
+  function saveEditedTask(task: Task) {
+    if (task.project.trim()) setProjects((current) => current.includes(task.project.trim()) ? current : [...current, task.project.trim()]);
+    setEditingTaskId(null);
+    if (task.calendarRequested && task.due) handleCalendarAction(task);
+    else flash("Cambios guardados");
   }
 
   function clearOrganizationFilters() {
@@ -685,13 +819,16 @@ export default function Home() {
     if (!preview.length) return;
     const requested = preview.filter((task) => task.calendarRequested && task.due);
     const firstRequested = requested[0];
-    const savedPreview = preview.map((task) => task.id === firstRequested?.id ? { ...task, calendarOpenedAt: new Date().toISOString() } : task);
-    if (firstRequested) window.open(googleCalendarUrl(firstRequested), "_blank", "noopener,noreferrer");
+    const savedPreview = preview.map((task) => task.id === firstRequested?.id && !googleConfigured ? { ...task, calendarOpenedAt: new Date().toISOString() } : task);
+    if (firstRequested) {
+      if (googleConfigured) window.setTimeout(() => void syncTaskWithGoogle(firstRequested), 0);
+      else window.open(googleCalendarUrl(firstRequested), "_blank", "noopener,noreferrer");
+    }
     setTasks((current) => [...current, ...savedPreview]);
     setProjects((current) => Array.from(new Set([...current, ...preview.map((task) => task.project).filter(Boolean)])));
     setShowRamble(false);
     setView("inbox");
-    flash(firstRequested ? "Tarea añadida; confirma el evento en Calendar" : `${preview.length} ${preview.length === 1 ? "tarea añadida" : "tareas añadidas"}`);
+    flash(firstRequested ? (googleConfigured ? "Tarea añadida; conectando con Calendar" : "Tarea añadida; confirma el evento en Calendar") : `${preview.length} ${preview.length === 1 ? "tarea añadida" : "tareas añadidas"}`);
   }
 
   function exportBackup() {
@@ -760,14 +897,14 @@ export default function Home() {
         <div className="task-list">
           {visibleTasks.map((task) => (
             <article className={`task-card p${task.priority}`} key={task.id}>
-              <button className="check" onClick={() => toggleTask(task.id)} aria-label={task.completed ? `Reabrir ${task.title}` : `Completar ${task.title}`}><span>{task.completed ? "✓" : ""}</span></button>
+              <button className="check" onClick={() => void toggleTask(task.id)} disabled={googleBusyTaskId === task.id} aria-label={task.completed ? `Reabrir ${task.title}` : `Completar ${task.title}`}><span>{task.completed ? "✓" : ""}</span></button>
               <div className="task-body">
                 <h2 className={task.completed ? "done" : ""}>{task.title}</h2>
                 {task.description && <p className="description">{task.description}</p>}
                 <div className="task-meta">
                   {task.due && <span className={task.due === todayISO() ? "due-today" : ""}>◷ {relativeDate(task.due)}{task.time ? ` · ${task.time}` : ""}</span>}
                   {task.recurring && <span>↻ {task.recurring}</span>}
-                  {task.due && <button className={`calendar-chip ${task.calendarOpenedAt ? "opened" : ""}`} onClick={() => openInGoogleCalendar(task)}>▦ {task.calendarOpenedAt ? "Abrir de nuevo" : task.calendarRequested ? "Añadir a Calendar" : "Calendar"}</button>}
+                  {task.due && <button className={`calendar-chip ${task.calendarEventId ? "synced" : task.calendarOpenedAt ? "opened" : ""}`} onClick={() => handleCalendarAction(task)} disabled={googleBusyTaskId === task.id}>▦ {googleBusyTaskId === task.id ? "Sincronizando…" : task.calendarEventId ? (task.calendarSyncState === "pending" ? "Actualizar Calendar" : "Sincronizada") : task.calendarOpenedAt ? "Abrir de nuevo" : task.calendarRequested ? "Añadir a Calendar" : "Calendar"}</button>}
                   <span className="project-dot"><i />{task.project}</span>
                   {task.labels.map((label) => <span key={label}>@{label}</span>)}
                 </div>
@@ -834,12 +971,14 @@ export default function Home() {
           <section className="calendar-sheet sheet" aria-label="Tareas para Google Calendar">
             <div className="sheet-handle" />
             <div className="calendar-heading"><div><p>Planificación</p><h2>Google Calendar</h2></div><button onClick={() => setShowCalendar(false)} aria-label="Cerrar">×</button></div>
-            <div className="calendar-explainer"><span>▦</span><p>Brisa abre cada evento con el nombre, la fecha y la hora preparados. Solo tendrás que pulsar <strong>Guardar</strong> en Google Calendar.</p></div>
+            <div className={`google-connection ${googleConnected ? "connected" : ""}`}><div><span>{googleConnected ? "✓" : "G"}</span><div><strong>{googleConnected ? "Google Calendar conectado" : googleConfigured ? "Conecta Google Calendar" : "Conexión automática pendiente"}</strong><small>{googleConnected ? "Brisa puede crear y actualizar tus eventos" : googleConfigured ? "Autoriza únicamente la gestión de eventos" : "Mientras tanto puedes seguir abriendo eventos preparados"}</small></div></div>{googleConfigured && <button onClick={googleConnected ? disconnectGoogle : connectGoogle}>{googleConnected ? "Desconectar" : "Conectar"}</button>}</div>
+            {googleMessage && <p className="google-message" role="status">{googleMessage}</p>}
+            <div className="calendar-explainer"><span>▦</span><p>{googleConfigured ? "Las tareas sincronizadas se crean en tu calendario principal. Si cambias su fecha, hora o título, Brisa te avisará para actualizar el evento." : <>Brisa abre cada evento con el nombre, la fecha y la hora preparados. Solo tendrás que pulsar <strong>Guardar</strong> en Google Calendar.</>}</p></div>
             <div className="calendar-list">
-              {calendarTasks.map((task) => <article key={task.id}><div><h3>{task.title}</h3><p>{relativeDate(task.due)}{task.time ? ` · ${task.time}` : " · Todo el día"} · {task.project}</p></div><button className={task.calendarOpenedAt ? "opened" : ""} onClick={() => openInGoogleCalendar(task)}>{task.calendarOpenedAt ? "Abrir de nuevo" : "Añadir"}</button></article>)}
+              {calendarTasks.map((task) => <article key={task.id}><div><h3>{task.title}</h3><p>{relativeDate(task.due)}{task.time ? ` · ${task.time}` : " · Todo el día"} · {task.project}{task.calendarEventId ? task.calendarSyncState === "pending" ? " · Cambios pendientes" : " · Sincronizada" : ""}</p></div><button className={task.calendarEventId ? "synced" : task.calendarOpenedAt ? "opened" : ""} onClick={() => handleCalendarAction(task)} disabled={googleBusyTaskId === task.id}>{googleBusyTaskId === task.id ? "Guardando…" : task.calendarEventId ? task.calendarSyncState === "pending" ? "Actualizar" : "Sincronizada" : task.calendarOpenedAt ? "Abrir de nuevo" : "Añadir"}</button></article>)}
               {!calendarTasks.length && <div className="calendar-empty"><span>◷</span><h3>No hay tareas fechadas</h3><p>Añade una fecha a una tarea y aparecerá aquí.</p></div>}
             </div>
-            <p className="calendar-footnote">La sincronización automática llegará al conectar tu cuenta de Google. Por ahora, nada se comparte sin que tú lo confirmes.</p>
+            <p className="calendar-footnote">Brisa solo solicita permiso para gestionar eventos de calendarios que te pertenecen. Puedes desconectarla en cualquier momento.</p>
           </section>
         </div>
       )}
@@ -874,7 +1013,7 @@ export default function Home() {
               <div className={`calendar-option ${task.calendarRequested ? "selected" : ""}`}><div><span>▦</span><div><strong>Google Calendar</strong><small>{task.due ? "Abrir el evento preparado al guardar" : "Añade una fecha para activar esta opción"}</small></div></div><label className="switch"><input type="checkbox" checked={Boolean(task.calendarRequested)} disabled={!task.due} onChange={(event) => updateTask(task.id, { calendarRequested: event.target.checked })} /><i /></label></div>
               {task.calendarRequested && task.due && task.time && <label className="duration-field">Duración del evento<select value={task.durationMinutes || 30} onChange={(event) => updateTask(task.id, { durationMinutes: Number(event.target.value) })}><option value="15">15 minutos</option><option value="30">30 minutos</option><option value="60">1 hora</option><option value="90">1 hora y media</option><option value="120">2 horas</option></select></label>}
               <datalist id="saved-task-projects">{projects.map((project) => <option key={project} value={project} />)}</datalist>
-              <div className="editor-actions"><button className="delete-task" onClick={() => deleteTask(task.id)}>Eliminar tarea</button><button className="confirm-btn" onClick={() => { if (task.project.trim()) setProjects((current) => current.includes(task.project.trim()) ? current : [...current, task.project.trim()]); if (task.calendarRequested && task.due) openInGoogleCalendar(task); setEditingTaskId(null); if (!task.calendarRequested) flash("Cambios guardados"); }}>Guardar cambios</button></div>
+              <div className="editor-actions"><button className="delete-task" onClick={() => void deleteTask(task.id)}>Eliminar tarea</button><button className="confirm-btn" onClick={() => saveEditedTask(task)}>Guardar cambios</button></div>
             </section>
           </div>
         );
