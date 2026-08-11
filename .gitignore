@@ -36,6 +36,7 @@ yarn-error.log*
 
 /dist/
 /dist-locked-*/
+/brisa-sites.tar.gz
 /.wrangler/
 /outputs/
 /work/
