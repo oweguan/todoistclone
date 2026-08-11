@@ -2,7 +2,8 @@
 
 import { ChangeEvent, useEffect, useMemo, useRef, useState } from "react";
 
-type View = "inbox" | "today" | "upcoming" | "completed";
+type View = "inbox" | "today" | "upcoming" | "completed" | "browse";
+type SmartFilter = "priority-1" | "no-date";
 type Priority = 1 | 2 | 3 | 4;
 type InstallPromptEvent = Event & { prompt: () => Promise<void>; userChoice: Promise<{ outcome: "accepted" | "dismissed" }> };
 type GoogleTokenResponse = { access_token?: string; expires_in?: number; error?: string; error_description?: string };
@@ -323,7 +324,6 @@ export default function Home() {
   const [installPrompt, setInstallPrompt] = useState<InstallPromptEvent | null>(null);
   const [isStandalone, setIsStandalone] = useState(false);
   const [showInstallHelp, setShowInstallHelp] = useState(false);
-  const [showOrganizer, setShowOrganizer] = useState(false);
   const [showCalendar, setShowCalendar] = useState(false);
   const [googleConfigured, setGoogleConfigured] = useState<boolean | null>(null);
   const [googleConnected, setGoogleConnected] = useState(false);
@@ -332,6 +332,7 @@ export default function Home() {
   const [searchQuery, setSearchQuery] = useState("");
   const [selectedProject, setSelectedProject] = useState<string | null>(null);
   const [selectedLabel, setSelectedLabel] = useState<string | null>(null);
+  const [selectedFilter, setSelectedFilter] = useState<SmartFilter | null>(null);
   const [newProject, setNewProject] = useState("");
   const [renamingProject, setRenamingProject] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState("");
@@ -377,7 +378,7 @@ export default function Home() {
       } catch { /* keep starter tasks */ }
     }
     setHydrated(true);
-    if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=13", { updateViaCache: "none" }).then((registration) => registration.update()).catch(() => undefined);
+    if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=14", { updateViaCache: "none" }).then((registration) => registration.update()).catch(() => undefined);
     const action = new URLSearchParams(window.location.search).get("action");
     if (action === "ramble") window.setTimeout(openRamble, 0);
     if (action === "add") window.setTimeout(() => setShowComposer(true), 0);
@@ -396,18 +397,21 @@ export default function Home() {
   const visibleTasks = useMemo(() => {
     const active = tasks.filter((task) => !task.completed);
     let result: Task[];
-    const hasOrganizationFilter = Boolean(searchQuery.trim() || selectedProject || selectedLabel);
+    const hasOrganizationFilter = Boolean(searchQuery.trim() || selectedProject || selectedLabel || selectedFilter);
     if (view === "completed") result = tasks.filter((task) => task.completed).sort((a, b) => (b.completedAt || "").localeCompare(a.completedAt || ""));
+    else if (view === "browse") result = searchQuery.trim() ? active : [];
     else if (hasOrganizationFilter) result = active;
     else if (view === "today") result = active.filter((task) => task.due === todayISO());
     else if (view === "upcoming") result = active.filter((task) => task.due && task.due >= todayISO()).sort((a, b) => (a.due || "").localeCompare(b.due || ""));
     else result = active.filter((task) => task.project === "Bandeja de entrada");
     if (selectedProject) result = result.filter((task) => task.project === selectedProject);
     if (selectedLabel) result = result.filter((task) => task.labels.includes(selectedLabel));
+    if (selectedFilter === "priority-1") result = result.filter((task) => task.priority === 1);
+    if (selectedFilter === "no-date") result = result.filter((task) => !task.due);
     const query = searchQuery.trim().toLocaleLowerCase("es");
     if (query) result = result.filter((task) => [task.title, task.description || "", task.project, ...task.labels].join(" ").toLocaleLowerCase("es").includes(query));
     return result;
-  }, [tasks, view, searchQuery, selectedProject, selectedLabel]);
+  }, [tasks, view, searchQuery, selectedProject, selectedLabel, selectedFilter]);
 
   const availableLabels = useMemo(() => Array.from(new Set(tasks.flatMap((task) => task.labels))).sort((a, b) => a.localeCompare(b, "es")), [tasks]);
   const calendarTasks = useMemo(() => tasks.filter((task) => !task.completed && task.due).sort((a, b) => `${a.due}${a.time || ""}`.localeCompare(`${b.due}${b.time || ""}`)), [tasks]);
@@ -573,20 +577,22 @@ export default function Home() {
     setSearchQuery("");
     setSelectedProject(null);
     setSelectedLabel(null);
+    setSelectedFilter(null);
   }
 
   function changeView(nextView: View) {
     clearOrganizationFilters();
     setView(nextView);
+    setShowMenu(false);
   }
 
   function openProject(project: string) {
     setSearchQuery("");
     setSelectedLabel(null);
+    setSelectedFilter(null);
     setSelectedProject(project);
     setView("inbox");
     setShowMenu(false);
-    setShowOrganizer(false);
   }
 
   function addProject() {
@@ -857,14 +863,14 @@ export default function Home() {
     setShowMenu(false);
   }
 
-  const viewNames: Record<View, string> = { inbox: "Bandeja", today: "Hoy", upcoming: "Próximas", completed: "Completadas" };
-  const currentTitle = selectedProject || (selectedLabel ? `@${selectedLabel}` : searchQuery ? "Resultados" : viewNames[view]);
-  const currentEyebrow = selectedProject ? "Proyecto" : selectedLabel ? "Etiqueta" : searchQuery ? "Búsqueda" : view === "today" ? new Intl.DateTimeFormat("es-ES", { weekday: "long", day: "numeric", month: "long" }).format(new Date()) : "Tu espacio";
+  const viewNames: Record<View, string> = { inbox: "Bandeja", today: "Hoy", upcoming: "Próximas", completed: "Completadas", browse: "Explorar" };
+  const currentTitle = selectedProject || (selectedLabel ? `@${selectedLabel}` : selectedFilter === "priority-1" ? "Prioridad 1" : selectedFilter === "no-date" ? "Sin fecha" : searchQuery ? "Resultados" : viewNames[view]);
+  const currentEyebrow = selectedProject ? "Proyecto" : selectedLabel ? "Etiqueta" : selectedFilter ? "Filtro" : searchQuery ? "Búsqueda" : view === "today" ? new Intl.DateTimeFormat("es-ES", { weekday: "long", day: "numeric", month: "long" }).format(new Date()) : "Tu espacio";
 
   return (
     <main className="app-shell">
       <header className="topbar">
-        <button className="brand" aria-label="Ir a Hoy" onClick={() => setView("today")}><span className="brand-mark">B</span><span>Brisa</span></button>
+        <button className="brand" aria-label="Ir a Hoy" onClick={() => changeView("today")}><span className="brand-mark">B</span><span>Brisa</span></button>
         <div className="top-actions">
           <button className="icon-btn" onClick={openRamble} aria-label="Abrir Descarga mental"><span className="wave-mini">≋</span></button>
           <button className="icon-btn" onClick={() => setShowMenu((value) => !value)} aria-label="Abrir menú">•••</button>
@@ -872,10 +878,6 @@ export default function Home() {
         {showMenu && (
           <div className="overflow-menu">
             {!isStandalone && <button onClick={installAndroidApp}><span>⇩</span> Instalar en Android</button>}
-            <button onClick={() => { setShowOrganizer(true); setShowMenu(false); }}><span>⌕</span> Organizar y buscar</button>
-            <button onClick={() => { setShowCalendar(true); setShowMenu(false); }}><span>▦</span> Google Calendar</button>
-            <p className="menu-section-title">Proyectos</p>
-            {projects.map((project) => <button className={selectedProject === project ? "menu-project active" : "menu-project"} key={project} onClick={() => openProject(project)}><i /><span>{project}</span><b>{tasks.filter((task) => !task.completed && task.project === project).length}</b></button>)}
             <div className="menu-divider" />
             <button onClick={exportBackup}><span>⇩</span> Crear copia</button>
             <button onClick={() => importRef.current?.click()}><span>⇧</span> Restaurar copia</button>
@@ -885,6 +887,59 @@ export default function Home() {
       </header>
 
       <section className="content">
+        {view === "browse" ? (
+          <div className="browse-home">
+            <div className="browse-heading">
+              <p className="eyebrow">Tu espacio</p>
+              <h1>Explorar</h1>
+            </div>
+            <label className="browse-search"><span>⌕</span><input value={searchQuery} onChange={(event) => setSearchQuery(event.target.value)} placeholder="Buscar tareas" aria-label="Buscar tareas" /><button onClick={() => setSearchQuery("")} aria-label="Limpiar búsqueda">{searchQuery ? "×" : ""}</button></label>
+
+            {searchQuery.trim() ? (
+              <section className="browse-section" aria-label="Resultados de búsqueda">
+                <div className="browse-section-title"><h2>Resultados</h2><span>{visibleTasks.length}</span></div>
+                <div className="browse-results">
+                  {visibleTasks.map((task) => <button key={task.id} onClick={() => setEditingTaskId(task.id)}><i className={`priority-dot p${task.priority}`} /><span><strong>{task.title}</strong><small>{relativeDate(task.due)} · {task.project}</small></span><b>›</b></button>)}
+                  {!visibleTasks.length && <p>No hay tareas que coincidan con “{searchQuery}”.</p>}
+                </div>
+              </section>
+            ) : (
+              <>
+                <section className="browse-section" aria-label="Vistas">
+                  <div className="browse-section-title"><h2>Vistas</h2></div>
+                  <div className="browse-rows">
+                    <button onClick={() => changeView("completed")}><span className="browse-symbol completed-symbol">✓</span><span><strong>Completadas</strong><small>Consulta todo lo que ya has terminado</small></span><b>›</b></button>
+                    <button onClick={() => setShowCalendar(true)}><span className="browse-symbol calendar-symbol">▦</span><span><strong>Google Calendar</strong><small>{googleConnected ? "Conectado con Brisa" : "Planifica y sincroniza tus tareas"}</small></span><b>›</b></button>
+                  </div>
+                </section>
+
+                <section className="browse-section" aria-label="Mis proyectos">
+                  <div className="browse-section-title"><h2>Mis proyectos</h2><span>{projects.filter((project) => project !== "Bandeja de entrada").length}</span></div>
+                  <div className="project-list browse-project-list">{projects.filter((project) => project !== "Bandeja de entrada").map((project) => renamingProject === project ? (
+                    <div className="rename-project" key={project}><input autoFocus value={renameValue} onChange={(event) => setRenameValue(event.target.value)} onKeyDown={(event) => event.key === "Enter" && saveProjectRename()} /><button onClick={saveProjectRename}>Guardar</button><button onClick={() => setRenamingProject(null)}>Cancelar</button></div>
+                  ) : (
+                    <div className="project-row" key={project}><button className="project-filter" onClick={() => openProject(project)}><i /> <span>{project}</span><b>{tasks.filter((task) => !task.completed && task.project === project).length}</b></button><button aria-label={`Renombrar ${project}`} onClick={() => { setRenamingProject(project); setRenameValue(project); }}>✎</button><button aria-label={`Eliminar ${project}`} onClick={() => deleteProject(project)}>×</button></div>
+                  ))}</div>
+                  <div className="new-project"><input value={newProject} onChange={(event) => setNewProject(event.target.value)} onKeyDown={(event) => event.key === "Enter" && addProject()} placeholder="Nombre del proyecto" aria-label="Nombre del nuevo proyecto" /><button onClick={addProject} disabled={!newProject.trim()}>＋ Añadir</button></div>
+                </section>
+
+                <section className="browse-section" aria-label="Filtros">
+                  <div className="browse-section-title"><h2>Filtros</h2><span>2</span></div>
+                  <div className="browse-rows compact-rows">
+                    <button onClick={() => { setSelectedFilter("priority-1"); setSelectedProject(null); setSelectedLabel(null); setSearchQuery(""); setView("inbox"); }}><span className="browse-symbol priority-symbol">!</span><span><strong>Prioridad 1</strong><small>{tasks.filter((task) => !task.completed && task.priority === 1).length} tareas pendientes</small></span><b>›</b></button>
+                    <button onClick={() => { setSelectedFilter("no-date"); setSelectedProject(null); setSelectedLabel(null); setSearchQuery(""); setView("inbox"); }}><span className="browse-symbol no-date-symbol">—</span><span><strong>Sin fecha</strong><small>{tasks.filter((task) => !task.completed && !task.due).length} tareas pendientes</small></span><b>›</b></button>
+                  </div>
+                </section>
+
+                <section className="browse-section" aria-label="Etiquetas">
+                  <div className="browse-section-title"><h2>Etiquetas</h2><span>{availableLabels.length}</span></div>
+                  <div className="label-cloud">{availableLabels.length ? availableLabels.map((label) => <button key={label} onClick={() => { setSelectedLabel(label); setSelectedProject(null); setSelectedFilter(null); setSearchQuery(""); setView("inbox"); }}>@{label}</button>) : <p>Añade etiquetas desde el editor de una tarea.</p>}</div>
+                </section>
+              </>
+            )}
+          </div>
+        ) : (
+        <>
         <div className="view-heading">
           <div>
             <p className="eyebrow">{currentEyebrow}</p>
@@ -892,7 +947,7 @@ export default function Home() {
           </div>
           <span className="task-total">{visibleTasks.length}</span>
         </div>
-        {(searchQuery || selectedProject || selectedLabel) && <div className="active-filters"><span>{searchQuery && `“${searchQuery}”`}{selectedProject && ` · ${selectedProject}`}{selectedLabel && ` · @${selectedLabel}`}</span><button onClick={clearOrganizationFilters}>Quitar filtros</button></div>}
+        {(searchQuery || selectedProject || selectedLabel || selectedFilter) && <div className="active-filters"><span>{searchQuery && `“${searchQuery}”`}{selectedProject && ` · ${selectedProject}`}{selectedLabel && ` · @${selectedLabel}`}{selectedFilter === "priority-1" && " · Prioridad 1"}{selectedFilter === "no-date" && " · Sin fecha"}</span><button onClick={clearOrganizationFilters}>Quitar filtros</button></div>}
 
         <div className="task-list">
           {visibleTasks.map((task) => (
@@ -921,16 +976,18 @@ export default function Home() {
             </div>
           )}
         </div>
+        </>
+        )}
       </section>
 
       <button className="ramble-fab" onClick={openRamble} aria-label="Descarga mental"><span className="pulse" /><span className="wave">≋</span></button>
       <button className="add-fab" onClick={() => setShowComposer(true)} aria-label="Añadir tarea">+</button>
 
       <nav className="bottom-nav" aria-label="Navegación principal">
-        <button className={view === "inbox" && !selectedProject && !selectedLabel && !searchQuery ? "active" : ""} onClick={() => changeView("inbox")}><span className="nav-icon">▱</span><span>Bandeja</span>{counts.inbox > 0 && <b>{counts.inbox}</b>}</button>
-        <button className={view === "today" && !selectedProject && !selectedLabel && !searchQuery ? "active" : ""} onClick={() => changeView("today")}><span className="calendar-icon">{new Date().getDate()}</span><span>Hoy</span>{counts.today > 0 && <b>{counts.today}</b>}</button>
-        <button className={view === "upcoming" && !selectedProject && !selectedLabel && !searchQuery ? "active" : ""} onClick={() => changeView("upcoming")}><span className="nav-icon">⌁</span><span>Próximas</span></button>
-        <button className={view === "completed" && !selectedProject && !selectedLabel && !searchQuery ? "active" : ""} onClick={() => changeView("completed")}><span className="nav-icon">✓</span><span>Hechas</span></button>
+        <button className={view === "inbox" && !selectedProject && !selectedLabel && !selectedFilter && !searchQuery ? "active" : ""} onClick={() => changeView("inbox")}><span className="nav-icon">▱</span><span>Bandeja</span>{counts.inbox > 0 && <b>{counts.inbox}</b>}</button>
+        <button className={view === "today" && !selectedProject && !selectedLabel && !selectedFilter && !searchQuery ? "active" : ""} onClick={() => changeView("today")}><span className="calendar-icon">{new Date().getDate()}</span><span>Hoy</span>{counts.today > 0 && <b>{counts.today}</b>}</button>
+        <button className={view === "upcoming" && !selectedProject && !selectedLabel && !selectedFilter && !searchQuery ? "active" : ""} onClick={() => changeView("upcoming")}><span className="nav-icon">⌁</span><span>Próximas</span></button>
+        <button className={view === "browse" ? "active" : ""} onClick={() => changeView("browse")}><span className="browse-nav-icon"><i /><i /><i /></span><span>Explorar</span></button>
       </nav>
 
       {showInstallHelp && (
@@ -942,26 +999,6 @@ export default function Home() {
             <p>Abre el menú de Brave o Chrome y pulsa <strong>Instalar aplicación</strong> o <strong>Añadir a pantalla de inicio</strong>.</p>
             <p>Después podrás mantener pulsado el icono de Brisa para abrir directamente “Hablar” o “Añadir tarea”.</p>
             <button className="confirm-btn" onClick={() => setShowInstallHelp(false)}>Entendido</button>
-          </section>
-        </div>
-      )}
-
-      {showOrganizer && (
-        <div className="sheet-backdrop organizer-backdrop" onMouseDown={(event) => event.target === event.currentTarget && setShowOrganizer(false)}>
-          <section className="organizer sheet" aria-label="Organizar y buscar">
-            <div className="sheet-handle" />
-            <div className="organizer-heading"><div><p>Tu espacio</p><h2>Organizar y buscar</h2></div><button onClick={() => setShowOrganizer(false)} aria-label="Cerrar">×</button></div>
-            <label className="search-field"><span>⌕</span><input autoFocus value={searchQuery} onChange={(event) => setSearchQuery(event.target.value)} placeholder="Buscar tareas…" /><button onClick={() => setSearchQuery("")} aria-label="Limpiar búsqueda">{searchQuery ? "×" : ""}</button></label>
-            <div className="organizer-section"><div className="section-title"><h3>Proyectos</h3><span>{projects.length}</span></div>
-              <div className="project-list">{projects.map((project) => renamingProject === project ? (
-                <div className="rename-project" key={project}><input value={renameValue} onChange={(event) => setRenameValue(event.target.value)} onKeyDown={(event) => event.key === "Enter" && saveProjectRename()} /><button onClick={saveProjectRename}>Guardar</button><button onClick={() => setRenamingProject(null)}>Cancelar</button></div>
-              ) : (
-                <div className={selectedProject === project ? "project-row selected" : "project-row"} key={project}><button className="project-filter" onClick={() => openProject(project)}><i /> <span>{project}</span><b>{tasks.filter((task) => !task.completed && task.project === project).length}</b></button>{project !== "Bandeja de entrada" && <><button aria-label={`Renombrar ${project}`} onClick={() => { setRenamingProject(project); setRenameValue(project); }}>✎</button><button aria-label={`Eliminar ${project}`} onClick={() => deleteProject(project)}>×</button></>}</div>
-              ))}</div>
-              <div className="new-project"><input value={newProject} onChange={(event) => setNewProject(event.target.value)} onKeyDown={(event) => event.key === "Enter" && addProject()} placeholder="Nuevo proyecto" /><button onClick={addProject} disabled={!newProject.trim()}>Añadir</button></div>
-            </div>
-            <div className="organizer-section"><div className="section-title"><h3>Etiquetas</h3><span>{availableLabels.length}</span></div><div className="label-cloud">{availableLabels.length ? availableLabels.map((label) => <button className={selectedLabel === label ? "selected" : ""} key={label} onClick={() => { setSelectedLabel((current) => current === label ? null : label); setSelectedProject(null); }}>@{label}</button>) : <p>Añade etiquetas desde el editor de una tarea.</p>}</div></div>
-            <div className="organizer-footer"><button onClick={clearOrganizationFilters}>Limpiar filtros</button><button className="confirm-btn" onClick={() => setShowOrganizer(false)}>Ver {visibleTasks.length} {visibleTasks.length === 1 ? "tarea" : "tareas"}</button></div>
           </section>
         </div>
       )}

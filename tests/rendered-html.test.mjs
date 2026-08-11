@@ -19,6 +19,7 @@ test("renders Brisa with its essential mobile flows", async () => {
   assert.match(html, /Descarga mental/);
   assert.match(html, /Bandeja/);
   assert.match(html, /Próximas/);
+  assert.match(html, /Explorar/);
   assert.match(html, /manifest\.webmanifest/);
   assert.doesNotMatch(html, /codex-preview|Starter Project|Your site is taking shape/);
 });
@@ -49,9 +50,10 @@ test("keeps tasks local and supports voice and portable backups", async () => {
   assert.match(page, /task-edit-btn/);
   assert.match(page, /Guardar cambios/);
   assert.match(page, /Eliminar tarea/);
-  assert.match(page, /Organizar y buscar/);
+  assert.match(page, /view === "browse"/);
+  assert.match(page, /Mis proyectos/);
   assert.match(page, /PROJECTS_KEY/);
-  assert.match(page, /Nuevo proyecto/);
+  assert.match(page, /Nombre del proyecto/);
   assert.match(page, /Buscar tareas/);
   assert.match(page, /Etiquetas/);
   assert.match(page, /beforeinstallprompt/);
