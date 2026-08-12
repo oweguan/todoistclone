@@ -998,13 +998,13 @@ export default function Home() {
     event.stopPropagation();
     event.currentTarget.setPointerCapture(event.pointerId);
     dragOriginRef.current = { x: event.clientX, y: event.clientY, lastY: event.clientY, startedAt: performance.now(), scrolling: false };
-    setCurrentDrag({ kind, id, active: false, x: event.clientX, y: event.clientY });
-    if (dragTimerRef.current) window.clearTimeout(dragTimerRef.current);
     const directHandle = Boolean((event.target as HTMLElement).closest(".task-drag-handle, .section-drag-handle, .subtask-drag-handle"));
-    dragTimerRef.current = window.setTimeout(() => {
+    setCurrentDrag({ kind, id, active: directHandle, x: event.clientX, y: event.clientY });
+    if (dragTimerRef.current) window.clearTimeout(dragTimerRef.current);
+    if (!directHandle) dragTimerRef.current = window.setTimeout(() => {
       const current = dragStateRef.current;
       if (current?.id === id && current.kind === kind && !dragOriginRef.current?.scrolling) setCurrentDrag({ ...current, active: true });
-    }, directHandle ? 40 : 260);
+    }, 260);
   }
 
   function updateDrag(event: ReactPointerEvent<HTMLElement>) {
