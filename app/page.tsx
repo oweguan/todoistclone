@@ -459,6 +459,7 @@ export default function Home() {
   const sampleRateRef = useRef(48000);
   const dragOriginRef = useRef<{ x: number; y: number; lastY: number; startedAt: number; scrolling: boolean } | null>(null);
   const dragStateRef = useRef<DragState | null>(null);
+  const dragTimerRef = useRef<number | null>(null);
   const transcriberRef = useRef<Promise<any> | null>(null);
   const googleClientIdRef = useRef("");
   const googleTokenClientRef = useRef<GoogleTokenClient | null>(null);
@@ -503,7 +504,11 @@ export default function Home() {
       } catch { /* keep starter tasks */ }
     }
     setHydrated(true);
-    if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=19", { updateViaCache: "none" }).then((registration) => registration.update()).catch(() => undefined);
+    if ("serviceWorker" in navigator) {
+      let refreshing = false;
+      navigator.serviceWorker.addEventListener("controllerchange", () => { if (!refreshing) { refreshing = true; window.location.reload(); } });
+      navigator.serviceWorker.register("/sw.js?v=20", { updateViaCache: "none" }).then(async (registration) => { registration.waiting?.postMessage("SKIP_WAITING"); await registration.update(); registration.waiting?.postMessage("SKIP_WAITING"); }).catch(() => undefined);
+    }
     const action = new URLSearchParams(window.location.search).get("action");
     if (action === "ramble") window.setTimeout(openRamble, 0);
     if (action === "add") window.setTimeout(() => setShowComposer(true), 0);
@@ -994,6 +999,12 @@ export default function Home() {
     event.currentTarget.setPointerCapture(event.pointerId);
     dragOriginRef.current = { x: event.clientX, y: event.clientY, lastY: event.clientY, startedAt: performance.now(), scrolling: false };
     setCurrentDrag({ kind, id, active: false, x: event.clientX, y: event.clientY });
+    if (dragTimerRef.current) window.clearTimeout(dragTimerRef.current);
+    const directHandle = Boolean((event.target as HTMLElement).closest(".task-drag-handle, .section-drag-handle, .subtask-drag-handle"));
+    dragTimerRef.current = window.setTimeout(() => {
+      const current = dragStateRef.current;
+      if (current?.id === id && current.kind === kind && !dragOriginRef.current?.scrolling) setCurrentDrag({ ...current, active: true });
+    }, directHandle ? 40 : 260);
   }
 
   function updateDrag(event: ReactPointerEvent<HTMLElement>) {
@@ -1001,13 +1012,14 @@ export default function Home() {
     const origin = dragOriginRef.current;
     if (!current || !origin) return;
     const distance = Math.hypot(event.clientX - origin.x, event.clientY - origin.y);
-    if (!current.active && (origin.scrolling || (performance.now() - origin.startedAt < 240 && distance > 5))) {
+    if (!current.active && (origin.scrolling || distance > 12)) {
+      if (!origin.scrolling && dragTimerRef.current) window.clearTimeout(dragTimerRef.current);
       origin.scrolling = true;
-      window.scrollBy({ top: origin.lastY - event.clientY });
+      if (Math.abs(event.clientY - origin.y) >= Math.abs(event.clientX - origin.x)) window.scrollBy({ top: origin.lastY - event.clientY });
       origin.lastY = event.clientY;
       return;
     }
-    if (!current.active && performance.now() - origin.startedAt < 240) return;
+    if (!current.active) return;
     const active = current.active || distance > 5;
     if (!active) return;
     event.preventDefault();
@@ -1038,6 +1050,7 @@ export default function Home() {
   }
 
   function finishDrag(event: ReactPointerEvent<HTMLElement>) {
+    if (dragTimerRef.current) { window.clearTimeout(dragTimerRef.current); dragTimerRef.current = null; }
     if (event.type === "pointercancel") {
       try { event.currentTarget.releasePointerCapture(event.pointerId); } catch { /* pointer already released */ }
       dragOriginRef.current = null;
@@ -1502,6 +1515,7 @@ export default function Home() {
           <span className="task-total">{displayTasks.length}</span>
         </div>
         {(searchQuery || selectedLabel || selectedFilter || selectedSavedFilter) && <div className="active-filters"><span>{searchQuery && `“${searchQuery}”`}{selectedLabel && ` · @${selectedLabel}`}{selectedFilter === "priority-1" && " · Prioridad 1"}{selectedFilter === "no-date" && " · Sin fecha"}{selectedSavedFilter && ` · ${savedFilters.find((item) => item.id === selectedSavedFilter)?.name || "Filtro"}`}</span><button onClick={clearOrganizationFilters}>Quitar filtros</button></div>}
+        {!sectionProject && <div className="smart-view-tools"><button onClick={() => openSectionDialog("create")}>＋ Crear sección</button><button onClick={cycleGroup}>≡ {groupLabels[viewGroup]}</button><button onClick={cycleSort}>↕ {sortLabels[viewSort]}</button></div>}
 
         <div className={`task-list ${sectionProject ? `project-task-list project-layout-${projectLayout}` : ""}`}>
           {sectionProject ? (() => {
