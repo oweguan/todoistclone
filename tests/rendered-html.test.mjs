@@ -52,7 +52,7 @@ test("keeps tasks local and supports voice and portable backups", async () => {
   assert.match(page, /Eliminar tarea/);
   assert.match(page, /view === "browse"/);
   assert.match(page, /Mis Proyectos/);
-  assert.match(page, /Nombre de la sección/);
+  assert.match(page, /Nueva sección/);
   assert.match(page, /Subtareas/);
   assert.match(page, /Comentarios/);
   assert.match(page, /Recordatorio/);
@@ -63,6 +63,11 @@ test("keeps tasks local and supports voice and portable backups", async () => {
   assert.match(page, /Reportes/);
   assert.match(page, /matchesSavedFilter/);
   assert.match(page, /Notification\.requestPermission/);
+  assert.match(page, /beginDrag/);
+  assert.match(page, /finishDrag/);
+  assert.match(page, /Mantén pulsado y arrastra/);
+  assert.match(page, /Mover a otro proyecto/);
+  assert.match(page, /Vista.*tablero/);
   assert.match(page, /function moveTask/);
   assert.match(page, /SECTIONS_KEY/);
   assert.match(page, /PROJECTS_KEY/);
