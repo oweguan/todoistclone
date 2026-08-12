@@ -5,6 +5,10 @@ import { ChangeEvent, useEffect, useMemo, useRef, useState } from "react";
 type View = "inbox" | "today" | "upcoming" | "completed" | "browse";
 type SmartFilter = "priority-1" | "no-date";
 type Priority = 1 | 2 | 3 | 4;
+type ProjectDetails = { description?: string; favorite?: boolean; archived?: boolean; color?: string };
+type SectionDetails = { description?: string; archived?: boolean };
+type SavedFilter = { id: string; name: string; query: string; favorite?: boolean };
+type TaskComment = { id: string; text: string; createdAt: string };
 type InstallPromptEvent = Event & { prompt: () => Promise<void>; userChoice: Promise<{ outcome: "accepted" | "dismissed" }> };
 type GoogleTokenResponse = { access_token?: string; expires_in?: number; error?: string; error_description?: string };
 type GoogleTokenClient = { callback: (response: GoogleTokenResponse) => void; requestAccessToken: (options?: { prompt?: string }) => void };
@@ -34,11 +38,16 @@ type Task = {
   calendarSyncState?: "pending" | "synced" | "error";
   section?: string;
   parentId?: string;
+  reminder?: string;
+  comments?: TaskComment[];
 };
 
 const STORAGE_KEY = "brisa.tasks.v1";
 const PROJECTS_KEY = "brisa.projects.v1";
 const SECTIONS_KEY = "brisa.sections.v1";
+const PROJECT_DETAILS_KEY = "brisa.project-details.v1";
+const SECTION_DETAILS_KEY = "brisa.section-details.v1";
+const FILTERS_KEY = "brisa.filters.v1";
 const PROJECTS = ["Bandeja de entrada", "Personal", "Trabajo", "Administración"];
 
 const seedTasks: Task[] = [
@@ -128,6 +137,22 @@ export function googleCalendarEvent(task: Task) {
 
 function uid() {
   return `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function matchesSavedFilter(task: Task, rawQuery: string) {
+  const query = rawQuery.toLocaleLowerCase("es").trim();
+  const parts = query.split("&").map((part) => part.trim()).filter(Boolean);
+  return parts.every((part) => {
+    if (part === "p1" || part === "p2" || part === "p3" || part === "p4") return task.priority === Number(part.slice(1));
+    if (part === "hoy" || part === "today") return task.due === todayISO();
+    if (part === "mañana" || part === "tomorrow") return task.due === addDaysISO(1);
+    if (part === "sin fecha" || part === "no date") return !task.due;
+    if (part === "vencida" || part === "overdue") return Boolean(task.due && task.due < todayISO());
+    if (part.startsWith("@")) return task.labels.some((label) => label.toLocaleLowerCase("es") === part.slice(1));
+    if (part.startsWith("#")) return task.project.toLocaleLowerCase("es") === part.slice(1);
+    if (part.startsWith("buscar:")) return [task.title, task.description || ""].join(" ").toLocaleLowerCase("es").includes(part.slice(7).trim());
+    return [task.title, task.description || "", task.project, ...task.labels].join(" ").toLocaleLowerCase("es").includes(part);
+  });
 }
 
 const ACTION_VERBS = ["revisar", "llamar", "comprar", "enviar", "hacer", "pedir", "reservar", "recoger", "programar", "preparar", "pagar", "escribir", "llevar", "buscar", "limpiar", "terminar"];
@@ -346,12 +371,26 @@ export default function Home() {
   const [selectedProject, setSelectedProject] = useState<string | null>(null);
   const [selectedLabel, setSelectedLabel] = useState<string | null>(null);
   const [selectedFilter, setSelectedFilter] = useState<SmartFilter | null>(null);
+  const [selectedSavedFilter, setSelectedSavedFilter] = useState<string | null>(null);
   const [newProject, setNewProject] = useState("");
   const [projectSections, setProjectSections] = useState<Record<string, string[]>>({});
+  const [projectDetails, setProjectDetails] = useState<Record<string, ProjectDetails>>({});
+  const [sectionDetails, setSectionDetails] = useState<Record<string, SectionDetails>>({});
+  const [savedFilters, setSavedFilters] = useState<SavedFilter[]>([
+    { id: "filter-p1", name: "Prioridad 1", query: "p1", favorite: true },
+    { id: "filter-no-date", name: "Sin fecha", query: "sin fecha" },
+  ]);
+  const [browsePane, setBrowsePane] = useState<"home" | "search" | "filters" | "projects" | "reports">("home");
+  const [newFilterName, setNewFilterName] = useState("");
+  const [newFilterQuery, setNewFilterQuery] = useState("");
   const [newSectionName, setNewSectionName] = useState("");
   const [collapsedSections, setCollapsedSections] = useState<string[]>([]);
   const [sectionMenu, setSectionMenu] = useState<string | null>(null);
   const [subtaskTitle, setSubtaskTitle] = useState("");
+  const [commentText, setCommentText] = useState("");
+  const [composerDue, setComposerDue] = useState<string | undefined>(undefined);
+  const [selectedUpcomingDate, setSelectedUpcomingDate] = useState(todayISO());
+  const [showCompletedInProject, setShowCompletedInProject] = useState(false);
   const [renamingProject, setRenamingProject] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState("");
   const [thoughts, setThoughts] = useState("");
@@ -392,6 +431,14 @@ export default function Home() {
       const savedSections = JSON.parse(localStorage.getItem(SECTIONS_KEY) || "{}");
       if (savedSections && typeof savedSections === "object" && !Array.isArray(savedSections)) setProjectSections(savedSections);
     } catch { /* keep projects without sections */ }
+    try {
+      const details = JSON.parse(localStorage.getItem(PROJECT_DETAILS_KEY) || "{}");
+      if (details && typeof details === "object" && !Array.isArray(details)) setProjectDetails(details);
+      const sectionInfo = JSON.parse(localStorage.getItem(SECTION_DETAILS_KEY) || "{}");
+      if (sectionInfo && typeof sectionInfo === "object" && !Array.isArray(sectionInfo)) setSectionDetails(sectionInfo);
+      const filters = JSON.parse(localStorage.getItem(FILTERS_KEY) || "[]");
+      if (Array.isArray(filters) && filters.length) setSavedFilters(filters);
+    } catch { /* keep starter organization */ }
     if (saved) {
       try {
         const savedTasks: Task[] = JSON.parse(saved);
@@ -425,10 +472,32 @@ export default function Home() {
     if (hydrated) localStorage.setItem("brisa.theme", theme);
   }, [theme, hydrated]);
 
+  useEffect(() => {
+    if (!hydrated) return;
+    localStorage.setItem(PROJECT_DETAILS_KEY, JSON.stringify(projectDetails));
+    localStorage.setItem(SECTION_DETAILS_KEY, JSON.stringify(sectionDetails));
+    localStorage.setItem(FILTERS_KEY, JSON.stringify(savedFilters));
+  }, [projectDetails, sectionDetails, savedFilters, hydrated]);
+
+  useEffect(() => {
+    if (!hydrated || typeof Notification === "undefined" || Notification.permission !== "granted") return;
+    const timers = tasks.flatMap((task) => {
+      if (task.completed || !task.reminder) return [];
+      const delay = new Date(task.reminder).getTime() - Date.now();
+      const firedKey = `brisa.reminder-fired.${task.id}.${task.reminder}`;
+      if (delay <= 0 || delay > 2_147_000_000 || localStorage.getItem(firedKey)) return [];
+      return [window.setTimeout(() => {
+        new Notification(task.title, { body: `${task.project}${task.due ? ` · ${relativeDate(task.due)}` : ""}`, icon: "/brisa-192.png" });
+        localStorage.setItem(firedKey, "1");
+      }, delay)];
+    });
+    return () => timers.forEach((timer) => window.clearTimeout(timer));
+  }, [tasks, hydrated]);
+
   const visibleTasks = useMemo(() => {
-    const active = tasks.filter((task) => !task.completed);
+    const active = tasks.filter((task) => !task.completed || Boolean(selectedProject && showCompletedInProject));
     let result: Task[];
-    const hasOrganizationFilter = Boolean(searchQuery.trim() || selectedProject || selectedLabel || selectedFilter);
+    const hasOrganizationFilter = Boolean(searchQuery.trim() || selectedProject || selectedLabel || selectedFilter || selectedSavedFilter);
     if (view === "completed") result = tasks.filter((task) => task.completed).sort((a, b) => (b.completedAt || "").localeCompare(a.completedAt || ""));
     else if (view === "browse") result = searchQuery.trim() ? active : [];
     else if (hasOrganizationFilter) result = active;
@@ -439,11 +508,15 @@ export default function Home() {
     if (selectedLabel) result = result.filter((task) => task.labels.includes(selectedLabel));
     if (selectedFilter === "priority-1") result = result.filter((task) => task.priority === 1);
     if (selectedFilter === "no-date") result = result.filter((task) => !task.due);
+    if (selectedSavedFilter) {
+      const filter = savedFilters.find((item) => item.id === selectedSavedFilter);
+      if (filter) result = result.filter((task) => matchesSavedFilter(task, filter.query));
+    }
     const query = searchQuery.trim().toLocaleLowerCase("es");
     if (query) result = result.filter((task) => [task.title, task.description || "", task.project, ...task.labels].join(" ").toLocaleLowerCase("es").includes(query));
     if (selectedProject) result = result.filter((task) => !task.parentId);
     return result;
-  }, [tasks, view, searchQuery, selectedProject, selectedLabel, selectedFilter]);
+  }, [tasks, view, searchQuery, selectedProject, selectedLabel, selectedFilter, selectedSavedFilter, savedFilters, showCompletedInProject]);
 
   const availableLabels = useMemo(() => Array.from(new Set(tasks.flatMap((task) => task.labels))).sort((a, b) => a.localeCompare(b, "es")), [tasks]);
   const calendarTasks = useMemo(() => tasks.filter((task) => !task.completed && task.due).sort((a, b) => `${a.due}${a.time || ""}`.localeCompare(`${b.due}${b.time || ""}`)), [tasks]);
@@ -458,9 +531,11 @@ export default function Home() {
     if (!quickTitle.trim()) return;
     const parsed = parseThoughts(quickTitle)[0];
     const task = parsed || { id: uid(), title: quickTitle.trim(), project: "Bandeja de entrada", priority: 4 as Priority, labels: [], completed: false, createdAt: new Date().toISOString() };
-    setTasks((current) => [...current, selectedProject ? { ...task, project: selectedProject, section: composerSection } : task]);
+    const preparedTask = { ...task, ...(composerDue ? { due: composerDue } : {}) };
+    setTasks((current) => [...current, selectedProject ? { ...preparedTask, project: selectedProject, section: composerSection } : preparedTask]);
     setQuickTitle("");
     setComposerSection(undefined);
+    setComposerDue(undefined);
     setShowComposer(false);
     flash("Tarea añadida");
   }
@@ -468,6 +543,12 @@ export default function Home() {
   function flash(message: string) {
     setNotice(message);
     window.setTimeout(() => setNotice(""), 2200);
+  }
+
+  async function requestReminderPermission() {
+    if (!("Notification" in window)) { flash("Este navegador no admite notificaciones"); return; }
+    const permission = await Notification.requestPermission();
+    flash(permission === "granted" ? "Recordatorios activados" : "Permiso de notificaciones no concedido");
   }
 
   async function installAndroidApp() {
@@ -614,6 +695,7 @@ export default function Home() {
     setSelectedProject(null);
     setSelectedLabel(null);
     setSelectedFilter(null);
+    setSelectedSavedFilter(null);
   }
 
   function changeView(nextView: View) {
@@ -626,6 +708,7 @@ export default function Home() {
     setSearchQuery("");
     setSelectedLabel(null);
     setSelectedFilter(null);
+    setSelectedSavedFilter(null);
     setSelectedProject(project);
     setView("inbox");
     setShowMenu(false);
@@ -635,6 +718,7 @@ export default function Home() {
     const name = newProject.trim();
     if (!name || projects.some((project) => project.toLocaleLowerCase("es") === name.toLocaleLowerCase("es"))) return;
     setProjects((current) => [...current, name]);
+    setProjectDetails((current) => ({ ...current, [name]: { color: "#df514f" } }));
     setNewProject("");
     openProject(name);
     flash("Proyecto creado y abierto");
@@ -647,6 +731,8 @@ export default function Home() {
     if (projects.some((project) => project !== oldName && project.toLocaleLowerCase("es") === name.toLocaleLowerCase("es"))) return;
     setProjects((current) => current.map((project) => project === oldName ? name : project));
     setTasks((current) => current.map((task) => task.project === oldName ? { ...task, project: name } : task));
+    setProjectDetails((current) => { const next = { ...current, [name]: current[oldName] || {} }; delete next[oldName]; return next; });
+    setSectionDetails((current) => Object.fromEntries(Object.entries(current).map(([key, value]) => [key.startsWith(`${oldName}::`) ? `${name}${key.slice(oldName.length)}` : key, value])));
     setProjectSections((current) => {
       if (!current[oldName]) return current;
       const next = { ...current, [name]: current[oldName] };
@@ -661,15 +747,17 @@ export default function Home() {
   function deleteProject(project: string) {
     if (project === "Bandeja de entrada") return;
     setProjects((current) => current.filter((item) => item !== project));
-    setTasks((current) => current.map((task) => task.project === project ? { ...task, project: "Bandeja de entrada" } : task));
+    setTasks((current) => current.filter((task) => task.project !== project));
     setProjectSections((current) => { const next = { ...current }; delete next[project]; return next; });
+    setProjectDetails((current) => { const next = { ...current }; delete next[project]; return next; });
+    setSectionDetails((current) => Object.fromEntries(Object.entries(current).filter(([key]) => !key.startsWith(`${project}::`))));
     if (selectedProject === project) setSelectedProject(null);
-    flash("Proyecto eliminado; sus tareas están en Bandeja");
+    flash("Proyecto y tareas eliminados");
   }
 
-  function addSection() {
+  function addSection(nameOverride?: string) {
     if (!selectedProject) return;
-    const name = newSectionName.trim();
+    const name = nameOverride?.trim() || newSectionName.trim();
     if (!name || (projectSections[selectedProject] || []).some((section) => section.toLocaleLowerCase("es") === name.toLocaleLowerCase("es"))) return;
     setProjectSections((current) => ({ ...current, [selectedProject]: [...(current[selectedProject] || []), name] }));
     setNewSectionName("");
@@ -692,9 +780,87 @@ export default function Home() {
   function deleteSection(section: string) {
     if (!selectedProject) return;
     setProjectSections((current) => ({ ...current, [selectedProject]: (current[selectedProject] || []).filter((item) => item !== section) }));
-    setTasks((current) => current.map((task) => task.project === selectedProject && task.section === section ? { ...task, section: undefined } : task));
+    setTasks((current) => current.filter((task) => !(task.project === selectedProject && task.section === section)));
     setSectionMenu(null);
-    flash("Sección eliminada; sus tareas están en Sin sección");
+    flash("Sección y tareas eliminadas");
+  }
+
+  function sectionKey(project: string, section: string) { return `${project}::${section}`; }
+
+  function editSection(section: string) {
+    if (!selectedProject) return;
+    const name = window.prompt("Nombre de la sección", section)?.trim();
+    if (!name || name === section) return;
+    setProjectSections((current) => ({ ...current, [selectedProject]: (current[selectedProject] || []).map((item) => item === section ? name : item) }));
+    setTasks((current) => current.map((task) => task.project === selectedProject && task.section === section ? { ...task, section: name } : task));
+    const oldKey = sectionKey(selectedProject, section); const newKey = sectionKey(selectedProject, name);
+    setSectionDetails((current) => { const next = { ...current, [newKey]: current[oldKey] || {} }; delete next[oldKey]; return next; });
+    setSectionMenu(null);
+  }
+
+  function describeSection(section: string) {
+    if (!selectedProject) return;
+    const key = sectionKey(selectedProject, section);
+    const description = window.prompt("Descripción de la sección", sectionDetails[key]?.description || "");
+    if (description === null) return;
+    setSectionDetails((current) => ({ ...current, [key]: { ...current[key], description: description.trim() || undefined } }));
+    setSectionMenu(null);
+  }
+
+  function duplicateSection(section: string) {
+    if (!selectedProject) return;
+    const copyName = `Copia de ${section}`;
+    setProjectSections((current) => ({ ...current, [selectedProject]: [...(current[selectedProject] || []), copyName] }));
+    const originals = tasks.filter((task) => task.project === selectedProject && task.section === section && !task.completed);
+    const idMap = new Map(originals.map((task) => [task.id, uid()]));
+    setTasks((current) => [...current, ...originals.map((task) => ({ ...task, id: idMap.get(task.id)!, section: copyName, parentId: task.parentId ? idMap.get(task.parentId) : undefined, comments: [], createdAt: new Date().toISOString() }))]);
+    setSectionMenu(null); flash("Sección duplicada");
+  }
+
+  function archiveSection(section: string) {
+    if (!selectedProject) return;
+    const key = sectionKey(selectedProject, section);
+    const archived = Boolean(sectionDetails[key]?.archived);
+    setSectionDetails((current) => ({ ...current, [key]: { ...current[key], archived: !archived } }));
+    if (!archived) setTasks((current) => current.map((task) => task.project === selectedProject && task.section === section ? { ...task, completed: true, completedAt: new Date().toISOString() } : task));
+    setSectionMenu(null); flash(archived ? "Sección restaurada" : "Sección archivada");
+  }
+
+  function duplicateProject(project: string) {
+    const copyName = `Copia de ${project}`;
+    setProjects((current) => [...current, copyName]);
+    setProjectDetails((current) => ({ ...current, [copyName]: { ...current[project], favorite: false, archived: false } }));
+    setProjectSections((current) => ({ ...current, [copyName]: [...(current[project] || [])] }));
+    setSectionDetails((current) => ({ ...current, ...Object.fromEntries(Object.entries(current).filter(([key]) => key.startsWith(`${project}::`)).map(([key, value]) => [`${copyName}${key.slice(project.length)}`, { ...value, archived: false }])) }));
+    const originals = tasks.filter((task) => task.project === project && !task.completed);
+    const idMap = new Map(originals.map((task) => [task.id, uid()]));
+    setTasks((current) => [...current, ...originals.map((task) => ({ ...task, id: idMap.get(task.id)!, project: copyName, parentId: task.parentId ? idMap.get(task.parentId) : undefined, comments: [], reminder: undefined, createdAt: new Date().toISOString() }))]);
+    openProject(copyName); flash("Proyecto duplicado");
+  }
+
+  async function copyBrisaLink(kind: "project" | "section" | "task", value: string) {
+    const url = `${window.location.origin}${window.location.pathname}#${kind}=${encodeURIComponent(value)}`;
+    try { await navigator.clipboard.writeText(url); flash("Enlace copiado"); } catch { flash("No se pudo copiar el enlace"); }
+  }
+
+  function duplicateTask(task: Task) {
+    const children = tasks.filter((item) => item.parentId === task.id && !item.completed);
+    const newId = uid();
+    setTasks((current) => [...current, { ...task, id: newId, title: `Copia de ${task.title}`, completed: false, completedAt: undefined, comments: [], createdAt: new Date().toISOString() }, ...children.map((child) => ({ ...child, id: uid(), parentId: newId, completed: false, completedAt: undefined, comments: [], createdAt: new Date().toISOString() }))]);
+    flash("Tarea duplicada");
+  }
+
+  function addComment(task: Task) {
+    const text = commentText.trim(); if (!text) return;
+    updateTask(task.id, { comments: [...(task.comments || []), { id: uid(), text, createdAt: new Date().toISOString() }] });
+    setCommentText("");
+  }
+
+  function addSavedFilter() {
+    const name = newFilterName.trim(); const query = newFilterQuery.trim();
+    if (!name || !query) return;
+    setSavedFilters((current) => [...current, { id: uid(), name, query }]);
+    setNewFilterName(""); setNewFilterQuery(""); flash("Filtro guardado");
   }
 
   function moveTask(id: string, direction: -1 | 1) {
@@ -935,7 +1101,7 @@ export default function Home() {
   }
 
   function exportBackup() {
-    const backup = { app: "Brisa", version: 3, exportedAt: new Date().toISOString(), projects, projectSections, tasks };
+    const backup = { app: "Brisa", version: 4, exportedAt: new Date().toISOString(), projects, projectDetails, projectSections, sectionDetails, savedFilters, tasks };
     const url = URL.createObjectURL(new Blob([JSON.stringify(backup, null, 2)], { type: "application/json" }));
     const a = document.createElement("a");
     a.href = url;
@@ -955,6 +1121,9 @@ export default function Home() {
       setTasks(backup.tasks);
       if (Array.isArray(backup.projects)) setProjects(Array.from(new Set([...PROJECTS, ...backup.projects])) as string[]);
       if (backup.projectSections && typeof backup.projectSections === "object" && !Array.isArray(backup.projectSections)) setProjectSections(backup.projectSections);
+      if (backup.projectDetails && typeof backup.projectDetails === "object") setProjectDetails(backup.projectDetails);
+      if (backup.sectionDetails && typeof backup.sectionDetails === "object") setSectionDetails(backup.sectionDetails);
+      if (Array.isArray(backup.savedFilters)) setSavedFilters(backup.savedFilters);
       flash("Copia restaurada");
     } catch { flash("No reconozco esta copia"); }
     event.target.value = "";
@@ -989,12 +1158,12 @@ export default function Home() {
   }
 
   const viewNames: Record<View, string> = { inbox: "Bandeja de entrada", today: "Hoy", upcoming: "Próximo", completed: "Completadas", browse: "Explorar" };
-  const currentTitle = selectedProject || (selectedLabel ? `@${selectedLabel}` : selectedFilter === "priority-1" ? "Prioridad 1" : selectedFilter === "no-date" ? "Sin fecha" : searchQuery ? "Resultados" : viewNames[view]);
-  const currentEyebrow = selectedProject ? "Proyecto" : selectedLabel ? "Etiqueta" : selectedFilter ? "Filtro" : searchQuery ? "Búsqueda" : view === "today" ? new Intl.DateTimeFormat("es-ES", { weekday: "long", day: "numeric", month: "long" }).format(new Date()) : "Tu espacio";
+  const currentTitle = selectedProject || (selectedLabel ? `@${selectedLabel}` : selectedSavedFilter ? savedFilters.find((item) => item.id === selectedSavedFilter)?.name || "Filtro" : selectedFilter === "priority-1" ? "Prioridad 1" : selectedFilter === "no-date" ? "Sin fecha" : searchQuery ? "Resultados" : viewNames[view]);
+  const currentEyebrow = selectedProject ? "Proyecto" : selectedLabel ? "Etiqueta" : selectedFilter || selectedSavedFilter ? "Filtro" : searchQuery ? "Búsqueda" : view === "today" ? new Intl.DateTimeFormat("es-ES", { weekday: "long", day: "numeric", month: "long" }).format(new Date()) : "Tu espacio";
 
   return (
     <main className={`app-shell theme-${theme}`}>
-      <header className="topbar">
+      {view !== "browse" && <header className="topbar">
         <button className="brand current-view-brand" aria-label={selectedProject ? "Volver a Explorar" : "Ir a Hoy"} onClick={() => selectedProject ? changeView("browse") : changeView("today")}>{selectedProject && <span className="back-symbol">‹</span>}<span>{view === "browse" ? "Brisa" : currentTitle}</span></button>
         <div className="top-actions">
           <button className="icon-btn" onClick={openRamble} aria-label="Abrir Descarga mental"><span className="wave-mini">≋</span></button>
@@ -1002,67 +1171,45 @@ export default function Home() {
         </div>
         {showMenu && (
           <div className="overflow-menu">
-            {!isStandalone && <button onClick={installAndroidApp}><span>⇩</span> Instalar en Android</button>}
-            <button onClick={() => { setShowSettings(true); setShowMenu(false); }}><span>⚙</span> Configuración</button>
-            <div className="menu-divider" />
-            <button onClick={exportBackup}><span>⇩</span> Crear copia</button>
-            <button onClick={() => importRef.current?.click()}><span>⇧</span> Restaurar copia</button>
+            {selectedProject ? <>
+              <button onClick={() => { const name = window.prompt("Nombre de la sección"); if (name) addSection(name); setShowMenu(false); }}><span>▣</span> Añadir sección</button>
+              <button onClick={() => void copyBrisaLink("project", selectedProject)}><span>↗</span> Copiar enlace al proyecto</button>
+              <button onClick={() => { const description = window.prompt("Descripción del proyecto", projectDetails[selectedProject]?.description || ""); if (description !== null) setProjectDetails((current) => ({ ...current, [selectedProject]: { ...current[selectedProject], description: description.trim() || undefined } })); setShowMenu(false); }}><span>☵</span> Descripción</button>
+              <button onClick={() => { setProjectDetails((current) => ({ ...current, [selectedProject]: { ...current[selectedProject], favorite: !current[selectedProject]?.favorite } })); setShowMenu(false); }}><span>♥</span> {projectDetails[selectedProject]?.favorite ? "Quitar de Favoritos" : "Añadir a Favoritos"}</button>
+              <button onClick={() => { setShowCompletedInProject((value) => !value); setShowMenu(false); }}><span>✓</span> {showCompletedInProject ? "Ocultar completadas" : "Mostrar completadas"}</button>
+              <button onClick={() => { duplicateProject(selectedProject); setShowMenu(false); }}><span>⧉</span> Duplicar proyecto</button>
+              <button onClick={() => { setProjectDetails((current) => ({ ...current, [selectedProject]: { ...current[selectedProject], archived: true } })); changeView("browse"); }}><span>⌄</span> Archivar proyecto</button>
+              <button className="danger-menu-item" onClick={() => { const project = selectedProject; deleteProject(project); changeView("browse"); }}>× Eliminar proyecto</button>
+            </> : <>
+              {!isStandalone && <button onClick={installAndroidApp}><span>⇩</span> Instalar en Android</button>}
+              <button onClick={() => { setShowSettings(true); setShowMenu(false); }}><span>⚙</span> Configuración</button>
+              <div className="menu-divider" />
+              <button onClick={exportBackup}><span>⇩</span> Crear copia</button>
+              <button onClick={() => importRef.current?.click()}><span>⇧</span> Restaurar copia</button>
+            </>}
             <input ref={importRef} type="file" accept="application/json" onChange={importBackup} hidden />
           </div>
         )}
-      </header>
+      </header>}
+      {selectedProject && projectDetails[selectedProject]?.description && <button className="project-description-line" onClick={() => { const description = window.prompt("Descripción del proyecto", projectDetails[selectedProject]?.description || ""); if (description !== null) setProjectDetails((current) => ({ ...current, [selectedProject]: { ...current[selectedProject], description: description.trim() || undefined } })); }}>{projectDetails[selectedProject]?.description}</button>}
 
       <section className="content">
         {view === "browse" ? (
           <div className="browse-home">
             <div className="browse-heading">
-              <div><span className="profile-mark">B</span><div><p className="eyebrow">Tu espacio</p><h1>Brisa</h1></div></div>
+              <div>{browsePane !== "home" && <button className="browse-back" onClick={() => { setBrowsePane("home"); setSearchQuery(""); }}>‹</button>}<span className="profile-mark">B</span><div><p className="eyebrow">Tu espacio</p><h1>{browsePane === "search" ? "Buscar" : browsePane === "filters" ? "Filtros y Etiquetas" : browsePane === "projects" ? "Gestionar proyectos" : browsePane === "reports" ? "Reportes" : "Brisa"}</h1></div></div>
               <button onClick={() => setShowSettings(true)} aria-label="Abrir configuración">⚙</button>
             </div>
-            <label className="browse-search"><span>⌕</span><input value={searchQuery} onChange={(event) => setSearchQuery(event.target.value)} placeholder="Buscar tareas" aria-label="Buscar tareas" /><button onClick={() => setSearchQuery("")} aria-label="Limpiar búsqueda">{searchQuery ? "×" : ""}</button></label>
-
-            {searchQuery.trim() ? (
-              <section className="browse-section" aria-label="Resultados de búsqueda">
-                <div className="browse-section-title"><h2>Resultados</h2><span>{visibleTasks.length}</span></div>
-                <div className="browse-results">
-                  {visibleTasks.map((task) => <button key={task.id} onClick={() => setEditingTaskId(task.id)}><i className={`priority-dot p${task.priority}`} /><span><strong>{task.title}</strong><small>{relativeDate(task.due)} · {task.project}</small></span><b>›</b></button>)}
-                  {!visibleTasks.length && <p>No hay tareas que coincidan con “{searchQuery}”.</p>}
-                </div>
-              </section>
-            ) : (
-              <>
-                <section className="browse-section" aria-label="Vistas">
-                  <div className="browse-section-title"><h2>Vistas</h2></div>
-                  <div className="browse-rows">
-                    <button onClick={() => changeView("completed")}><span className="browse-symbol completed-symbol">✓</span><span><strong>Completadas</strong><small>Consulta todo lo que ya has terminado</small></span><b>›</b></button>
-                    <button onClick={() => setShowCalendar(true)}><span className="browse-symbol calendar-symbol">▦</span><span><strong>Google Calendar</strong><small>{googleConnected ? "Conectado con Brisa" : "Planifica y sincroniza tus tareas"}</small></span><b>›</b></button>
-                  </div>
-                </section>
-
-                <section className="browse-section" aria-label="Mis proyectos">
-                  <div className="browse-section-title"><h2>Mis proyectos</h2><span>{projects.filter((project) => project !== "Bandeja de entrada").length}</span></div>
-                  <div className="project-list browse-project-list">{projects.filter((project) => project !== "Bandeja de entrada").map((project) => renamingProject === project ? (
-                    <div className="rename-project" key={project}><input autoFocus value={renameValue} onChange={(event) => setRenameValue(event.target.value)} onKeyDown={(event) => event.key === "Enter" && saveProjectRename()} /><button onClick={saveProjectRename}>Guardar</button><button onClick={() => setRenamingProject(null)}>Cancelar</button></div>
-                  ) : (
-                    <div className="project-row" key={project}><button className="project-filter" onClick={() => openProject(project)}><i /> <span>{project}</span><b>{tasks.filter((task) => !task.completed && task.project === project).length}</b></button><button aria-label={`Renombrar ${project}`} onClick={() => { setRenamingProject(project); setRenameValue(project); }}>✎</button><button aria-label={`Eliminar ${project}`} onClick={() => deleteProject(project)}>×</button></div>
-                  ))}</div>
-                  <div className="new-project"><input value={newProject} onChange={(event) => setNewProject(event.target.value)} onKeyDown={(event) => event.key === "Enter" && addProject()} placeholder="Nombre del proyecto" aria-label="Nombre del nuevo proyecto" /><button onClick={addProject} disabled={!newProject.trim()}>＋ Añadir</button></div>
-                </section>
-
-                <section className="browse-section" aria-label="Filtros">
-                  <div className="browse-section-title"><h2>Filtros</h2><span>2</span></div>
-                  <div className="browse-rows compact-rows">
-                    <button onClick={() => { setSelectedFilter("priority-1"); setSelectedProject(null); setSelectedLabel(null); setSearchQuery(""); setView("inbox"); }}><span className="browse-symbol priority-symbol">!</span><span><strong>Prioridad 1</strong><small>{tasks.filter((task) => !task.completed && task.priority === 1).length} tareas pendientes</small></span><b>›</b></button>
-                    <button onClick={() => { setSelectedFilter("no-date"); setSelectedProject(null); setSelectedLabel(null); setSearchQuery(""); setView("inbox"); }}><span className="browse-symbol no-date-symbol">—</span><span><strong>Sin fecha</strong><small>{tasks.filter((task) => !task.completed && !task.due).length} tareas pendientes</small></span><b>›</b></button>
-                  </div>
-                </section>
-
-                <section className="browse-section" aria-label="Etiquetas">
-                  <div className="browse-section-title"><h2>Etiquetas</h2><span>{availableLabels.length}</span></div>
-                  <div className="label-cloud">{availableLabels.length ? availableLabels.map((label) => <button key={label} onClick={() => { setSelectedLabel(label); setSelectedProject(null); setSelectedFilter(null); setSearchQuery(""); setView("inbox"); }}>@{label}</button>) : <p>Añade etiquetas desde el editor de una tarea.</p>}</div>
-                </section>
-              </>
-            )}
+            {browsePane === "home" && <>
+              <section className="browse-section browse-primary-actions"><div className="browse-rows"><button onClick={() => setBrowsePane("search")}><span className="browse-symbol">⌕</span><span><strong>Buscar</strong><small>Tareas, proyectos, secciones, comentarios y etiquetas</small></span><b>›</b></button><button onClick={() => setBrowsePane("filters")}><span className="browse-symbol">▦</span><span><strong>Filtros y Etiquetas</strong><small>Crea vistas con consultas combinadas</small></span><b>›</b></button><button onClick={() => setBrowsePane("reports")}><span className="browse-symbol">⌁</span><span><strong>Reportes</strong><small>{tasks.filter((task) => task.completed).length} tareas completadas</small></span><b>›</b></button></div></section>
+              {projects.some((project) => projectDetails[project]?.favorite && !projectDetails[project]?.archived) && <section className="browse-section"><div className="browse-section-title"><h2>Favoritos</h2></div><div className="browse-project-list">{projects.filter((project) => projectDetails[project]?.favorite && !projectDetails[project]?.archived).map((project) => <div className="project-row" key={project}><button className="project-filter" onClick={() => openProject(project)}><i /><span>{project}</span><b>{tasks.filter((task) => !task.completed && task.project === project).length}</b></button></div>)}</div></section>}
+              <section className="browse-section"><div className="browse-section-title"><h2>Mis Proyectos</h2><button className="title-add" onClick={() => setBrowsePane("projects")}>＋</button></div><div className="browse-project-list">{projects.filter((project) => project !== "Bandeja de entrada" && !projectDetails[project]?.archived).map((project) => <div className="project-row" key={project}><button className="project-filter" onClick={() => openProject(project)}><i /><span>{project}</span><b>{tasks.filter((task) => !task.completed && task.project === project).length}</b></button></div>)}<button className="manage-projects" onClick={() => setBrowsePane("projects")}>✎ <span>Gestionar proyectos</span></button></div></section>
+              <section className="browse-section"><div className="browse-rows"><button onClick={() => setShowCalendar(true)}><span className="browse-symbol calendar-symbol">▦</span><span><strong>Google Calendar</strong><small>{googleConnected ? "Conectado" : "Conectar y sincronizar"}</small></span><b>›</b></button><button onClick={() => setShowSettings(true)}><span className="browse-symbol">?</span><span><strong>Ayuda y configuración</strong><small>Personalización, datos y conexiones</small></span><b>›</b></button></div></section>
+            </>}
+            {browsePane === "search" && <><label className="browse-search"><span>⌕</span><input autoFocus value={searchQuery} onChange={(event) => setSearchQuery(event.target.value)} placeholder="Buscar en Brisa" /><button onClick={() => setSearchQuery("")}>{searchQuery ? "×" : ""}</button></label>{searchQuery.trim() ? <div className="search-groups"><section><h2>Tareas</h2>{tasks.filter((task) => [task.title, task.description || ""].join(" ").toLocaleLowerCase("es").includes(searchQuery.toLocaleLowerCase("es"))).map((task) => <button key={task.id} onClick={() => setEditingTaskId(task.id)}><span>○</span><div><strong>{task.title}</strong><small>{task.project}{task.section ? ` / ${task.section}` : ""}</small></div></button>)}</section><section><h2>Proyectos y secciones</h2>{projects.filter((project) => project.toLocaleLowerCase("es").includes(searchQuery.toLocaleLowerCase("es"))).map((project) => <button key={project} onClick={() => openProject(project)}><span>#</span><div><strong>{project}</strong><small>Proyecto</small></div></button>)}{Object.entries(projectSections).flatMap(([project, sections]) => sections.filter((section) => section.toLocaleLowerCase("es").includes(searchQuery.toLocaleLowerCase("es"))).map((section) => <button key={`${project}-${section}`} onClick={() => openProject(project)}><span>/</span><div><strong>{section}</strong><small>{project}</small></div></button>))}</section><section><h2>Etiquetas y comentarios</h2>{availableLabels.filter((label) => label.toLocaleLowerCase("es").includes(searchQuery.toLocaleLowerCase("es"))).map((label) => <button key={label} onClick={() => { clearOrganizationFilters(); setSelectedLabel(label); setView("inbox"); }}><span>@</span><div><strong>{label}</strong><small>Etiqueta</small></div></button>)}{tasks.flatMap((task) => (task.comments || []).filter((comment) => comment.text.toLocaleLowerCase("es").includes(searchQuery.toLocaleLowerCase("es"))).map((comment) => <button key={comment.id} onClick={() => setEditingTaskId(task.id)}><span>☵</span><div><strong>{comment.text}</strong><small>{task.title}</small></div></button>))}</section></div> : <p className="pane-hint">Busca por nombre, descripción, proyecto, sección, etiqueta o comentario.</p>}</>}
+            {browsePane === "filters" && <><section className="browse-section"><div className="browse-section-title"><h2>Filtros</h2><span>{savedFilters.length}</span></div><div className="browse-rows">{savedFilters.map((filter) => <button key={filter.id} onClick={() => { clearOrganizationFilters(); setSelectedSavedFilter(filter.id); setView("inbox"); }}><span className="browse-symbol">⌁</span><span><strong>{filter.name}</strong><small>{filter.query}</small></span><b>{tasks.filter((task) => !task.completed && matchesSavedFilter(task, filter.query)).length}</b></button>)}</div><div className="filter-creator"><input value={newFilterName} onChange={(event) => setNewFilterName(event.target.value)} placeholder="Nombre del filtro" /><input value={newFilterQuery} onChange={(event) => setNewFilterQuery(event.target.value)} placeholder="Consulta: hoy & @email" /><button onClick={addSavedFilter} disabled={!newFilterName.trim() || !newFilterQuery.trim()}>Añadir filtro</button></div></section><section className="browse-section"><div className="browse-section-title"><h2>Etiquetas</h2><span>{availableLabels.length}</span></div><div className="label-cloud">{availableLabels.length ? availableLabels.map((label) => <button key={label} onClick={() => { clearOrganizationFilters(); setSelectedLabel(label); setView("inbox"); }}>@{label}</button>) : <p>Añade etiquetas desde una tarea.</p>}</div></section></>}
+            {browsePane === "projects" && <section className="browse-section"><div className="browse-project-list manage-list">{projects.filter((project) => project !== "Bandeja de entrada").map((project) => renamingProject === project ? <div className="rename-project" key={project}><input autoFocus value={renameValue} onChange={(event) => setRenameValue(event.target.value)} /><button onClick={saveProjectRename}>Guardar</button><button onClick={() => setRenamingProject(null)}>×</button></div> : <div className={`project-row ${projectDetails[project]?.archived ? "archived" : ""}`} key={project}><button className="favorite-toggle" onClick={() => setProjectDetails((current) => ({ ...current, [project]: { ...current[project], favorite: !current[project]?.favorite } }))}>{projectDetails[project]?.favorite ? "♥" : "♡"}</button><button className="project-filter" onClick={() => openProject(project)}><i /><span>{project}</span><b>{tasks.filter((task) => !task.completed && task.project === project).length}</b></button><button onClick={() => { setRenamingProject(project); setRenameValue(project); }}>✎</button><button onClick={() => setProjectDetails((current) => ({ ...current, [project]: { ...current[project], archived: !current[project]?.archived } }))}>{projectDetails[project]?.archived ? "↺" : "⌄"}</button><button onClick={() => deleteProject(project)}>×</button></div>)}</div><div className="new-project"><input value={newProject} onChange={(event) => setNewProject(event.target.value)} placeholder="Nombre del proyecto" /><button onClick={addProject} disabled={!newProject.trim()}>＋ Añadir</button></div></section>}
+            {browsePane === "reports" && <section className="reports-pane"><article className="report-hero"><span>✓</span><div><strong>{tasks.filter((task) => task.completed).length}</strong><small>Tareas completadas</small></div></article><h2>Por proyecto</h2><div className="report-projects">{projects.map((project) => { const completed = tasks.filter((task) => task.completed && task.project === project).length; const total = tasks.filter((task) => task.project === project).length; return total ? <div key={project}><header><strong>{project}</strong><span>{completed}/{total}</span></header><i><b style={{ width: `${Math.round(completed / total * 100)}%` }} /></i></div> : null; })}</div><button className="completed-link" onClick={() => changeView("completed")}>Ver todas las tareas completadas</button></section>}
           </div>
         ) : (
         <>
@@ -1070,7 +1217,7 @@ export default function Home() {
           <button className="month-toggle" onClick={() => setExpandedCalendar((value) => !value)}>{new Intl.DateTimeFormat("es-ES", { month: "long", year: "numeric" }).format(new Date())}<span>{expandedCalendar ? "▴" : "▾"}</span></button>
           <div className="calendar-days">{Array.from({ length: expandedCalendar ? 28 : 7 }, (_, index) => {
             const date = new Date(); date.setDate(date.getDate() + index); const iso = localISO(date); const hasTasks = tasks.some((task) => !task.completed && task.due === iso);
-            return <button key={iso} className={index === 0 ? "today" : ""} onClick={() => { setQuickTitle(`Tarea para ${iso}`); setShowComposer(true); }}><small>{new Intl.DateTimeFormat("es-ES", { weekday: "narrow" }).format(date)}</small><span>{date.getDate()}</span>{hasTasks && <i />}</button>;
+            return <button key={iso} className={`${index === 0 ? "today" : ""} ${selectedUpcomingDate === iso ? "selected" : ""}`} onClick={() => setSelectedUpcomingDate(iso)}><small>{new Intl.DateTimeFormat("es-ES", { weekday: "narrow" }).format(date)}</small><span>{date.getDate()}</span>{hasTasks && <i />}</button>;
           })}</div>
         </section>}
         <div className="view-heading compact-view-heading">
@@ -1080,11 +1227,11 @@ export default function Home() {
           </div>
           <span className="task-total">{visibleTasks.length}</span>
         </div>
-        {(searchQuery || selectedProject || selectedLabel || selectedFilter) && <div className="active-filters"><span>{searchQuery && `“${searchQuery}”`}{selectedProject && ` · ${selectedProject}`}{selectedLabel && ` · @${selectedLabel}`}{selectedFilter === "priority-1" && " · Prioridad 1"}{selectedFilter === "no-date" && " · Sin fecha"}</span><button onClick={clearOrganizationFilters}>Quitar filtros</button></div>}
+        {(searchQuery || selectedLabel || selectedFilter || selectedSavedFilter) && <div className="active-filters"><span>{searchQuery && `“${searchQuery}”`}{selectedLabel && ` · @${selectedLabel}`}{selectedFilter === "priority-1" && " · Prioridad 1"}{selectedFilter === "no-date" && " · Sin fecha"}{selectedSavedFilter && ` · ${savedFilters.find((item) => item.id === selectedSavedFilter)?.name || "Filtro"}`}</span><button onClick={clearOrganizationFilters}>Quitar filtros</button></div>}
 
         <div className={`task-list ${selectedProject ? "project-task-list" : ""}`}>
           {selectedProject ? (() => {
-            const configuredSections = projectSections[selectedProject] || [];
+            const configuredSections = (projectSections[selectedProject] || []).filter((section) => showCompletedInProject || !sectionDetails[`${selectedProject}::${section}`]?.archived);
             const sectionNames = ["", ...configuredSections];
             return <>
               <div className="add-section-row"><input value={newSectionName} onChange={(event) => setNewSectionName(event.target.value)} onKeyDown={(event) => event.key === "Enter" && addSection()} placeholder="Nombre de la sección" aria-label="Nombre de la nueva sección" /><button onClick={addSection} disabled={!newSectionName.trim()}>＋ Sección</button></div>
@@ -1094,12 +1241,13 @@ export default function Home() {
                 const sectionKey = `${selectedProject}::${section || "sin-seccion"}`;
                 const collapsed = collapsedSections.includes(sectionKey);
                 return <section className="project-section" key={sectionKey}>
-                  <header><button className="section-toggle" onClick={() => setCollapsedSections((current) => current.includes(sectionKey) ? current.filter((item) => item !== sectionKey) : [...current, sectionKey])} aria-expanded={!collapsed}><span>{collapsed ? "›" : "⌄"}</span><strong>{section || "Sin sección"}</strong><small>{sectionTasks.length}</small></button><button className="section-more" onClick={() => setSectionMenu((current) => current === sectionKey ? null : sectionKey)} aria-label={`Opciones de ${section || "Sin sección"}`}>•••</button>{sectionMenu === sectionKey && <div className="section-menu"><button onClick={() => { setComposerSection(section || undefined); setShowComposer(true); setSectionMenu(null); }}>＋ Añadir tarea</button>{section && <><button onClick={() => moveSection(section, -1)}>↑ Mover arriba</button><button onClick={() => moveSection(section, 1)}>↓ Mover abajo</button><button className="danger" onClick={() => deleteSection(section)}>× Eliminar sección</button></>}</div>}</header>
+                  <header><button className="section-toggle" onClick={() => setCollapsedSections((current) => current.includes(sectionKey) ? current.filter((item) => item !== sectionKey) : [...current, sectionKey])} aria-expanded={!collapsed}><span>{collapsed ? "›" : "⌄"}</span><strong>{section || "Sin sección"}</strong><small>{sectionTasks.length}</small></button><button className="section-more" onClick={() => setSectionMenu((current) => current === sectionKey ? null : sectionKey)} aria-label={`Opciones de ${section || "Sin sección"}`}>•••</button>{sectionMenu === sectionKey && <div className="section-menu"><button onClick={() => { setComposerSection(section || undefined); setShowComposer(true); setSectionMenu(null); }}>＋ Añadir tarea</button>{section && <><button onClick={() => void copyBrisaLink("section", `${selectedProject}/${section}`)}>↗ Copiar enlace</button><button onClick={() => editSection(section)}>✎ Editar sección</button><button onClick={() => describeSection(section)}>☵ Descripción</button><button onClick={() => moveSection(section, -1)}>↑ Mover arriba</button><button onClick={() => moveSection(section, 1)}>↓ Mover abajo</button><button onClick={() => duplicateSection(section)}>⧉ Duplicar sección</button><button onClick={() => archiveSection(section)}>{sectionDetails[sectionKey]?.archived ? "↺ Restaurar sección" : "⌄ Archivar sección"}</button><button className="danger" onClick={() => deleteSection(section)}>× Eliminar sección</button></>}</div>}</header>
+                  {section && sectionDetails[sectionKey]?.description && <button className="section-description" onClick={() => describeSection(section)}>{sectionDetails[sectionKey]?.description}</button>}
                   {!collapsed && <div className="section-tasks">{sectionTasks.map((task) => renderTaskCard(task))}{!sectionTasks.length && <p className="section-empty">Todavía no hay tareas en esta sección.</p>}</div>}
                 </section>;
               })}
             </>;
-          })() : visibleTasks.map((task) => renderTaskCard(task))}
+          })() : view === "upcoming" ? Array.from(new Set(visibleTasks.map((task) => task.due).filter(Boolean))).map((date) => <section className="upcoming-day-group" key={date}><header><strong>{new Intl.DateTimeFormat("es-ES", { weekday: "long", day: "numeric", month: "short" }).format(new Date(`${date}T12:00:00`))}</strong>{date === todayISO() && <span>Hoy</span>}{date === addDaysISO(1) && <span>Mañana</span>}<button onClick={() => { setComposerDue(date); setShowComposer(true); }}>＋</button></header>{visibleTasks.filter((task) => task.due === date).map((task) => renderTaskCard(task))}</section>) : visibleTasks.map((task) => renderTaskCard(task))}
           {!visibleTasks.length && !(selectedProject && (projectSections[selectedProject] || []).length) && (
             <div className="empty-state">
               <div className="empty-orbit"><span>✓</span></div>
@@ -1114,12 +1262,12 @@ export default function Home() {
       </section>
 
       <button className="ramble-fab" onClick={openRamble} aria-label="Descarga mental"><span className="pulse" /><span className="wave">≋</span></button>
-      <button className="add-fab" onClick={() => { setComposerSection(undefined); setShowComposer(true); }} aria-label="Añadir tarea">+</button>
+      <button className="add-fab" onClick={() => { setComposerSection(undefined); setComposerDue(view === "today" ? todayISO() : view === "upcoming" ? selectedUpcomingDate : undefined); setShowComposer(true); }} aria-label="Añadir tarea">+</button>
 
       <nav className="bottom-nav" aria-label="Navegación principal">
-        <button className={view === "inbox" && !selectedProject && !selectedLabel && !selectedFilter && !searchQuery ? "active" : ""} onClick={() => changeView("inbox")}><span className="nav-icon">▱</span><span>Bandeja</span>{counts.inbox > 0 && <b>{counts.inbox}</b>}</button>
-        <button className={view === "today" && !selectedProject && !selectedLabel && !selectedFilter && !searchQuery ? "active" : ""} onClick={() => changeView("today")}><span className="calendar-icon">{new Date().getDate()}</span><span>Hoy</span>{counts.today > 0 && <b>{counts.today}</b>}</button>
-        <button className={view === "upcoming" && !selectedProject && !selectedLabel && !selectedFilter && !searchQuery ? "active" : ""} onClick={() => changeView("upcoming")}><span className="nav-icon">▦</span><span>Próximo</span></button>
+        <button className={view === "inbox" && !selectedProject && !selectedLabel && !selectedFilter && !selectedSavedFilter && !searchQuery ? "active" : ""} onClick={() => changeView("inbox")}><span className="nav-icon">▱</span><span>Bandeja</span>{counts.inbox > 0 && <b>{counts.inbox}</b>}</button>
+        <button className={view === "today" && !selectedProject && !selectedLabel && !selectedFilter && !selectedSavedFilter && !searchQuery ? "active" : ""} onClick={() => changeView("today")}><span className="calendar-icon">{new Date().getDate()}</span><span>Hoy</span>{counts.today > 0 && <b>{counts.today}</b>}</button>
+        <button className={view === "upcoming" && !selectedProject && !selectedLabel && !selectedFilter && !selectedSavedFilter && !searchQuery ? "active" : ""} onClick={() => changeView("upcoming")}><span className="nav-icon">▦</span><span>Próximo</span></button>
         <button className={view === "browse" ? "active" : ""} onClick={() => changeView("browse")}><span className="browse-nav-icon"><i /><i /><i /></span><span>Explorar</span></button>
       </nav>
 
@@ -1138,8 +1286,8 @@ export default function Home() {
 
       {showSettings && <div className="settings-screen">
         <header><button onClick={() => setShowSettings(false)} aria-label="Volver">‹</button><h2>Configuración</h2></header>
-        <section><h3>Personalización</h3><button onClick={() => setTheme((current) => current === "dark" ? "light" : "dark")}><span>◐</span><div><strong>Tema</strong><small>{theme === "dark" ? "Oscuro" : "Claro"}</small></div><b>›</b></button><button><span>▣</span><div><strong>Barra de navegación</strong><small>Bandeja, Hoy, Próximo y Explorar</small></div><b>›</b></button><button onClick={openRamble}><span>≋</span><div><strong>Descarga mental</strong><small>Captura rápida por voz</small></div><b>›</b></button></section>
-        <section><h3>Productividad</h3><button onClick={() => { setShowCalendar(true); setShowSettings(false); }}><span>▦</span><div><strong>Calendario</strong><small>{googleConnected ? "Google Calendar conectado" : "Configurar Google Calendar"}</small></div><b>›</b></button><button><span>◷</span><div><strong>Recordatorios</strong><small>Fechas y horas de tus tareas</small></div><b>›</b></button></section>
+        <section><h3>Personalización</h3><button onClick={() => setTheme((current) => current === "dark" ? "light" : "dark")}><span>◐</span><div><strong>Tema</strong><small>{theme === "dark" ? "Oscuro" : "Claro"}</small></div><b>›</b></button><button onClick={() => flash("La barra usa Bandeja, Hoy, Próximo y Explorar, como en Todoist Android")}><span>▣</span><div><strong>Barra de navegación</strong><small>Bandeja, Hoy, Próximo y Explorar</small></div><b>›</b></button><button onClick={openRamble}><span>≋</span><div><strong>Descarga mental</strong><small>Captura rápida por voz</small></div><b>›</b></button></section>
+        <section><h3>Productividad</h3><button onClick={() => { setShowCalendar(true); setShowSettings(false); }}><span>▦</span><div><strong>Calendario</strong><small>{googleConnected ? "Google Calendar conectado" : "Configurar Google Calendar"}</small></div><b>›</b></button><button onClick={() => void requestReminderPermission()}><span>◷</span><div><strong>Recordatorios</strong><small>{typeof Notification !== "undefined" && Notification.permission === "granted" ? "Notificaciones activadas" : "Activar notificaciones del navegador"}</small></div><b>›</b></button></section>
         <section><h3>Datos</h3><button onClick={exportBackup}><span>⇩</span><div><strong>Crear copia de seguridad</strong><small>Guarda proyectos, secciones y tareas</small></div><b>›</b></button><button onClick={() => importRef.current?.click()}><span>⇧</span><div><strong>Restaurar copia</strong><small>Recupera una copia de Brisa</small></div><b>›</b></button>{!isStandalone && <button onClick={installAndroidApp}><span>＋</span><div><strong>Instalar Brisa</strong><small>Añadir a la pantalla de inicio</small></div><b>›</b></button>}</section>
       </div>}
 
@@ -1181,6 +1329,7 @@ export default function Home() {
               <div className="editor-heading"><div><p># {task.project}{task.section ? ` / ${task.section}` : ""}</p><h2>Detalles de la tarea</h2></div><button onClick={() => setEditingTaskId(null)} aria-label="Cerrar editor">×</button></div>
               <label className="editor-title">Nombre<input autoFocus value={task.title} onChange={(event) => updateTask(task.id, { title: event.target.value })} /></label>
               <label className="editor-description">Descripción<textarea value={task.description || ""} onChange={(event) => updateTask(task.id, { description: event.target.value || undefined })} placeholder="Añade notas, enlaces o contexto" /></label>
+              <div className="task-action-chips"><button onClick={() => document.querySelector<HTMLInputElement>('.labels-field input')?.focus()}>◇ Etiquetas</button><button onClick={() => document.querySelector<HTMLInputElement>('.reminder-field input')?.focus()}>◷ Recordatorio</button><button onClick={() => document.querySelector<HTMLTextAreaElement>('.editor-description textarea')?.focus()}>☵ Descripción</button><button onClick={() => void copyBrisaLink("task", task.id)}>↗ Enlace</button></div>
               <div className="editor-grid">
                 <label>Fecha<input type="date" value={task.due || ""} onChange={(event) => updateTask(task.id, { due: event.target.value || undefined })} /></label>
                 <label>Hora<input type="time" value={task.time || ""} onChange={(event) => updateTask(task.id, { time: event.target.value || undefined })} /></label>
@@ -1188,6 +1337,7 @@ export default function Home() {
                 <label>Proyecto<input list="saved-task-projects" value={task.project} onChange={(event) => updateTask(task.id, { project: event.target.value || "Bandeja de entrada", section: undefined })} /></label>
                 <label className="section-field">Sección<select value={task.section || ""} onChange={(event) => updateTask(task.id, { section: event.target.value || undefined })}><option value="">Sin sección</option>{(projectSections[task.project] || []).map((section) => <option key={section} value={section}>{section}</option>)}</select></label>
                 <label className="labels-field">Etiquetas<input value={task.labels.join(", ")} placeholder="casa, llamadas, urgente" onChange={(event) => updateTask(task.id, { labels: event.target.value.split(",").map((label) => label.trim().replace(/^@/, "")).filter(Boolean) })} /></label>
+                <label className="reminder-field">Recordatorio<input type="datetime-local" value={task.reminder || ""} onChange={(event) => updateTask(task.id, { reminder: event.target.value || undefined })} /></label>
               </div>
               {!task.parentId && <div className="subtask-editor">
                 <div className="subtask-editor-heading"><strong>Subtareas</strong><span>{tasks.filter((item) => item.parentId === task.id).length}</span></div>
@@ -1196,8 +1346,9 @@ export default function Home() {
               </div>}
               <div className={`calendar-option ${task.calendarRequested ? "selected" : ""}`}><div><span>▦</span><div><strong>Google Calendar</strong><small>{task.due ? "Abrir el evento preparado al guardar" : "Añade una fecha para activar esta opción"}</small></div></div><label className="switch"><input type="checkbox" checked={Boolean(task.calendarRequested)} disabled={!task.due} onChange={(event) => updateTask(task.id, { calendarRequested: event.target.checked })} /><i /></label></div>
               {task.calendarRequested && task.due && task.time && <label className="duration-field">Duración del evento<select value={task.durationMinutes || 30} onChange={(event) => updateTask(task.id, { durationMinutes: Number(event.target.value) })}><option value="15">15 minutos</option><option value="30">30 minutos</option><option value="60">1 hora</option><option value="90">1 hora y media</option><option value="120">2 horas</option></select></label>}
+              <div className="task-comments"><div className="subtask-editor-heading"><strong>Comentarios</strong><span>{task.comments?.length || 0}</span></div>{(task.comments || []).map((comment) => <article key={comment.id}><p>{comment.text}</p><small>{new Intl.DateTimeFormat("es-ES", { dateStyle: "medium", timeStyle: "short" }).format(new Date(comment.createdAt))}</small></article>)}<div className="comment-composer"><input value={commentText} onChange={(event) => setCommentText(event.target.value)} onKeyDown={(event) => event.key === "Enter" && addComment(task)} placeholder="Añade un comentario" /><button onClick={() => addComment(task)} disabled={!commentText.trim()}>Enviar</button></div></div>
               <datalist id="saved-task-projects">{projects.map((project) => <option key={project} value={project} />)}</datalist>
-              <div className="editor-actions"><button className="delete-task" onClick={() => void deleteTask(task.id)}>Eliminar tarea</button><button className="confirm-btn" onClick={() => saveEditedTask(task)}>Guardar cambios</button></div>
+              <div className="task-secondary-actions"><button onClick={() => duplicateTask(task)}>⧉ Duplicar</button><button onClick={() => void copyBrisaLink("task", task.id)}>↗ Copiar enlace</button></div><div className="editor-actions"><button className="delete-task" onClick={() => void deleteTask(task.id)}>Eliminar tarea</button><button className="confirm-btn" onClick={() => saveEditedTask(task)}>Guardar cambios</button></div>
             </section>
           </div>
         );

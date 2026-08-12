@@ -154,3 +154,62 @@ button { color: inherit; }
 .settings-screen { position: fixed; z-index: 70; inset: 0; width: min(100%, 520px); margin: auto; overflow-y: auto; padding-bottom: calc(30px + env(safe-area-inset-bottom)); background: #20211f; color: #f2f1ee; }.settings-screen > header { height: 82px; display: flex; align-items: center; gap: 12px; padding: 18px; background: #302e29; }.settings-screen > header button { width: 40px; border: 0; background: transparent; color: #ccc9c3; font-size: 42px; font-weight: 300; cursor: pointer; }.settings-screen > header h2 { margin: 0; font-size: 23px; }.settings-screen section { padding: 17px 0 4px; border-bottom: 1px solid #3d3e3a; }.settings-screen h3 { margin: 0; padding: 0 20px 8px; color: #e96d65; font-size: 14px; }.settings-screen section > button { width: 100%; min-height: 68px; display: grid; grid-template-columns: 45px 1fr 18px; align-items: center; gap: 10px; padding: 9px 20px; border: 0; background: transparent; color: #f1f0ed; text-align: left; cursor: pointer; }.settings-screen section > button:hover { background: #2b2c29; }.settings-screen section > button > span { color: #c8c5bf; font-size: 23px; }.settings-screen section > button > div { display: grid; gap: 3px; }.settings-screen strong { font-size: 16px; }.settings-screen small { color: #aaa7a1; font-size: 12px; }.settings-screen b { color: #77746f; font-size: 21px; }
 .theme-dark .ramble-screen { background: #302e29; color: #f2f1ee; }.theme-dark .transcript-wrap, .theme-dark .preview-list article { border-color: #44443f; background: #20211f; }.theme-dark .transcript-wrap textarea, .theme-dark .preview-main input { color: #f1f0ed; }.theme-dark .ramble-screen > footer { background: linear-gradient(transparent, #302e29 18%); }
 .theme-light .settings-screen { background: #f8f7f2; color: #20251f; }.theme-light .settings-screen > header { background: white; }.theme-light .settings-screen > header button, .theme-light .settings-screen section > button { color: #20251f; }.theme-light .settings-screen section { border-bottom-color: #e1dfd7; }.theme-light .settings-screen section > button:hover { background: #eeeae1; }
+
+.danger-menu-item { color: #ff756e !important; }
+.project-description-line { width: 100%; padding: 0 18px 13px; border: 0; background: transparent; color: var(--muted); font-size: 12px; text-align: left; cursor: pointer; }
+.browse-back { width: 31px !important; height: 40px !important; margin-left: -9px; border-radius: 8px !important; color: #c9c7c2 !important; font-size: 35px !important; line-height: 1 !important; }
+.title-add { margin-left: auto; border: 0; background: transparent; color: #dedbd5; font-size: 24px; cursor: pointer; }
+.manage-projects { width: 100%; min-height: 54px; display: flex; align-items: center; gap: 15px; padding: 0 16px; border: 0; background: transparent; color: #ccc9c3; font-weight: 700; text-align: left; cursor: pointer; }
+.manage-list .project-row { grid-template-columns: 34px 1fr 34px 34px 34px; }
+.manage-list .project-row.archived { opacity: .52; }
+.manage-list .favorite-toggle { color: #e75a55; font-size: 19px; }
+.filter-creator { display: grid; gap: 8px; margin-top: 10px; padding: 13px; border-radius: 14px; background: #20211f; }
+.filter-creator input { height: 42px; padding: 0 11px; border: 1px solid #44443f; border-radius: 10px; background: #292a27; color: #f1f0ed; outline: 0; }
+.filter-creator button { height: 42px; border: 0; border-radius: 10px; background: #4c2928; color: #ff817a; font-weight: 750; cursor: pointer; }
+.filter-creator button:disabled { opacity: .4; }
+.pane-hint { margin: 30px 10px; color: #96938d; font-size: 13px; line-height: 1.55; text-align: center; }
+.search-groups { display: grid; gap: 18px; }
+.search-groups section { overflow: hidden; border-radius: 14px; background: #20211f; }
+.search-groups h2 { margin: 0; padding: 12px 14px 7px; color: #aaa7a1; font-size: 11px; text-transform: uppercase; }
+.search-groups section > button { width: 100%; min-height: 57px; display: grid; grid-template-columns: 27px 1fr; align-items: center; gap: 8px; padding: 9px 14px; border: 0; border-top: 1px solid #343531; background: transparent; color: #eee; text-align: left; cursor: pointer; }
+.search-groups section > button > span { color: #e75c56; font-size: 18px; }
+.search-groups section > button div { min-width: 0; display: grid; gap: 3px; }
+.search-groups strong, .search-groups small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.search-groups small { color: #9e9b95; }
+.reports-pane { display: grid; gap: 18px; }
+.report-hero { display: flex; align-items: center; gap: 18px; padding: 22px; border-radius: 16px; background: #20211f; }
+.report-hero > span { width: 52px; height: 52px; display: grid; place-items: center; border-radius: 50%; background: #33453a; color: #83ad8e; font-size: 26px; }
+.report-hero div { display: grid; }.report-hero strong { color: #f1f0ed; font-size: 30px; }.report-hero small { color: #aaa7a1; }
+.reports-pane h2 { margin: 2px 0 -7px; font-size: 15px; }
+.report-projects { display: grid; gap: 15px; padding: 17px; border-radius: 16px; background: #20211f; }
+.report-projects header { display: flex; justify-content: space-between; margin-bottom: 7px; font-size: 12px; }.report-projects header span { color: #96938d; }
+.report-projects i { height: 6px; display: block; overflow: hidden; border-radius: 5px; background: #383934; }.report-projects i b { height: 100%; display: block; border-radius: inherit; background: #df514f; }
+.completed-link { height: 45px; border: 0; border-radius: 11px; background: #4c2928; color: #ff817a; font-weight: 750; cursor: pointer; }
+.section-menu { max-height: min(64dvh, 510px); overflow-y: auto; }
+.section-description { margin: 5px 27px 8px; color: var(--muted); font-size: 11px; line-height: 1.4; }
+.upcoming-day-group { margin: 0 -16px; padding: 0 16px 13px; border-bottom: 12px solid #302e29; }
+.upcoming-day-group > header { min-height: 52px; display: flex; align-items: center; justify-content: space-between; }
+.upcoming-day-group > header strong { margin: 0; color: #d4d1cb; font-size: 17px; text-transform: capitalize; }
+.upcoming-day-group > header span { margin-left: 7px; color: #8e8b85; font-size: 11px; }
+.upcoming-day-group > header button { width: 36px; height: 36px; border: 0; border-radius: 50%; background: transparent; color: #ff756e; font-size: 25px; cursor: pointer; }
+.calendar-days button.selected:not(.today) { background: #4b2928; color: #ff817a; }
+.task-action-chips { display: flex; gap: 8px; overflow-x: auto; margin: 13px 0 2px; padding-bottom: 3px; scrollbar-width: none; }
+.task-action-chips button { flex: 0 0 auto; min-height: 37px; padding: 0 12px; border: 0; border-radius: 10px; background: #484743; color: #e5e2dc; font-size: 11px; font-weight: 700; cursor: pointer; }
+.reminder-field { grid-column: 1 / -1; }
+.task-comments { display: grid; gap: 9px; margin-top: 16px; padding: 13px; border: 1px solid var(--line); border-radius: 13px; background: #fbfaf7; }
+.task-comments article { padding: 9px 10px; border-radius: 10px; background: white; }
+.task-comments article p { margin: 0 0 6px; font-size: 13px; line-height: 1.45; white-space: pre-wrap; }
+.task-comments article small { color: var(--muted); font-size: 9px; }
+.comment-composer { display: grid; grid-template-columns: 1fr auto; gap: 7px; }
+.comment-composer input { min-width: 0; height: 39px; }
+.comment-composer button { border: 0; border-radius: 9px; padding: 0 12px; background: var(--sage); color: white; font-size: 11px; font-weight: 750; cursor: pointer; }
+.comment-composer button:disabled { opacity: .4; }
+.task-secondary-actions { display: flex; gap: 8px; margin-top: 14px; }
+.task-secondary-actions button { flex: 1; min-height: 39px; border: 1px solid var(--line); border-radius: 10px; background: transparent; color: var(--muted); font-weight: 700; cursor: pointer; }
+.theme-dark .task-comments { border-color: #41413c; background: #20211f; }
+.theme-dark .task-comments article { background: #2d2e2b; }
+.theme-dark .task-secondary-actions button { border-color: #474641; color: #c9c6c0; }
+.theme-light .filter-creator, .theme-light .search-groups section, .theme-light .report-hero, .theme-light .report-projects { background: white; }
+.theme-light .filter-creator input { border-color: #dedbd2; background: #faf9f5; color: #20251f; }
+.theme-light .search-groups section > button { border-top-color: #e5e2da; color: #20251f; }
+.theme-light .report-hero strong { color: #20251f; }
