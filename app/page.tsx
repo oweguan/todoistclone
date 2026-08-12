@@ -71,6 +71,12 @@ export function todayISO() {
   return d.toISOString().slice(0, 10);
 }
 
+function localISO(date: Date) {
+  const value = new Date(date);
+  value.setMinutes(value.getMinutes() - value.getTimezoneOffset());
+  return value.toISOString().slice(0, 10);
+}
+
 export function addDaysISO(days: number) {
   const d = new Date();
   d.setDate(d.getDate() + days);
@@ -328,6 +334,9 @@ export default function Home() {
   const [installPrompt, setInstallPrompt] = useState<InstallPromptEvent | null>(null);
   const [isStandalone, setIsStandalone] = useState(false);
   const [showInstallHelp, setShowInstallHelp] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
+  const [theme, setTheme] = useState<"dark" | "light">("dark");
+  const [expandedCalendar, setExpandedCalendar] = useState(false);
   const [showCalendar, setShowCalendar] = useState(false);
   const [googleConfigured, setGoogleConfigured] = useState<boolean | null>(null);
   const [googleConnected, setGoogleConnected] = useState(false);
@@ -341,6 +350,7 @@ export default function Home() {
   const [projectSections, setProjectSections] = useState<Record<string, string[]>>({});
   const [newSectionName, setNewSectionName] = useState("");
   const [collapsedSections, setCollapsedSections] = useState<string[]>([]);
+  const [sectionMenu, setSectionMenu] = useState<string | null>(null);
   const [subtaskTitle, setSubtaskTitle] = useState("");
   const [renamingProject, setRenamingProject] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState("");
@@ -368,6 +378,7 @@ export default function Home() {
   useEffect(() => {
     const standalone = window.matchMedia("(display-mode: standalone)").matches;
     setIsStandalone(standalone);
+    setTheme(localStorage.getItem("brisa.theme") === "light" ? "light" : "dark");
     const captureInstallPrompt = (event: Event) => { event.preventDefault(); setInstallPrompt(event as InstallPromptEvent); };
     window.addEventListener("beforeinstallprompt", captureInstallPrompt);
     const saved = localStorage.getItem(STORAGE_KEY);
@@ -390,7 +401,7 @@ export default function Home() {
       } catch { /* keep starter tasks */ }
     }
     setHydrated(true);
-    if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=15", { updateViaCache: "none" }).then((registration) => registration.update()).catch(() => undefined);
+    if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=16", { updateViaCache: "none" }).then((registration) => registration.update()).catch(() => undefined);
     const action = new URLSearchParams(window.location.search).get("action");
     if (action === "ramble") window.setTimeout(openRamble, 0);
     if (action === "add") window.setTimeout(() => setShowComposer(true), 0);
@@ -409,6 +420,10 @@ export default function Home() {
   useEffect(() => {
     if (hydrated) localStorage.setItem(SECTIONS_KEY, JSON.stringify(projectSections));
   }, [projectSections, hydrated]);
+
+  useEffect(() => {
+    if (hydrated) localStorage.setItem("brisa.theme", theme);
+  }, [theme, hydrated]);
 
   const visibleTasks = useMemo(() => {
     const active = tasks.filter((task) => !task.completed);
@@ -659,6 +674,27 @@ export default function Home() {
     setProjectSections((current) => ({ ...current, [selectedProject]: [...(current[selectedProject] || []), name] }));
     setNewSectionName("");
     flash("Sección añadida");
+  }
+
+  function moveSection(section: string, direction: -1 | 1) {
+    if (!selectedProject) return;
+    setProjectSections((current) => {
+      const sections = [...(current[selectedProject] || [])];
+      const index = sections.indexOf(section);
+      const target = index + direction;
+      if (index < 0 || target < 0 || target >= sections.length) return current;
+      [sections[index], sections[target]] = [sections[target], sections[index]];
+      return { ...current, [selectedProject]: sections };
+    });
+    setSectionMenu(null);
+  }
+
+  function deleteSection(section: string) {
+    if (!selectedProject) return;
+    setProjectSections((current) => ({ ...current, [selectedProject]: (current[selectedProject] || []).filter((item) => item !== section) }));
+    setTasks((current) => current.map((task) => task.project === selectedProject && task.section === section ? { ...task, section: undefined } : task));
+    setSectionMenu(null);
+    flash("Sección eliminada; sus tareas están en Sin sección");
   }
 
   function moveTask(id: string, direction: -1 | 1) {
@@ -952,14 +988,14 @@ export default function Home() {
     );
   }
 
-  const viewNames: Record<View, string> = { inbox: "Bandeja", today: "Hoy", upcoming: "Próximas", completed: "Completadas", browse: "Explorar" };
+  const viewNames: Record<View, string> = { inbox: "Bandeja de entrada", today: "Hoy", upcoming: "Próximo", completed: "Completadas", browse: "Explorar" };
   const currentTitle = selectedProject || (selectedLabel ? `@${selectedLabel}` : selectedFilter === "priority-1" ? "Prioridad 1" : selectedFilter === "no-date" ? "Sin fecha" : searchQuery ? "Resultados" : viewNames[view]);
   const currentEyebrow = selectedProject ? "Proyecto" : selectedLabel ? "Etiqueta" : selectedFilter ? "Filtro" : searchQuery ? "Búsqueda" : view === "today" ? new Intl.DateTimeFormat("es-ES", { weekday: "long", day: "numeric", month: "long" }).format(new Date()) : "Tu espacio";
 
   return (
-    <main className="app-shell">
+    <main className={`app-shell theme-${theme}`}>
       <header className="topbar">
-        <button className="brand" aria-label="Ir a Hoy" onClick={() => changeView("today")}><span className="brand-mark">B</span><span>Brisa</span></button>
+        <button className="brand current-view-brand" aria-label={selectedProject ? "Volver a Explorar" : "Ir a Hoy"} onClick={() => selectedProject ? changeView("browse") : changeView("today")}>{selectedProject && <span className="back-symbol">‹</span>}<span>{view === "browse" ? "Brisa" : currentTitle}</span></button>
         <div className="top-actions">
           <button className="icon-btn" onClick={openRamble} aria-label="Abrir Descarga mental"><span className="wave-mini">≋</span></button>
           <button className="icon-btn" onClick={() => setShowMenu((value) => !value)} aria-label="Abrir menú">•••</button>
@@ -967,6 +1003,7 @@ export default function Home() {
         {showMenu && (
           <div className="overflow-menu">
             {!isStandalone && <button onClick={installAndroidApp}><span>⇩</span> Instalar en Android</button>}
+            <button onClick={() => { setShowSettings(true); setShowMenu(false); }}><span>⚙</span> Configuración</button>
             <div className="menu-divider" />
             <button onClick={exportBackup}><span>⇩</span> Crear copia</button>
             <button onClick={() => importRef.current?.click()}><span>⇧</span> Restaurar copia</button>
@@ -979,8 +1016,8 @@ export default function Home() {
         {view === "browse" ? (
           <div className="browse-home">
             <div className="browse-heading">
-              <p className="eyebrow">Tu espacio</p>
-              <h1>Explorar</h1>
+              <div><span className="profile-mark">B</span><div><p className="eyebrow">Tu espacio</p><h1>Brisa</h1></div></div>
+              <button onClick={() => setShowSettings(true)} aria-label="Abrir configuración">⚙</button>
             </div>
             <label className="browse-search"><span>⌕</span><input value={searchQuery} onChange={(event) => setSearchQuery(event.target.value)} placeholder="Buscar tareas" aria-label="Buscar tareas" /><button onClick={() => setSearchQuery("")} aria-label="Limpiar búsqueda">{searchQuery ? "×" : ""}</button></label>
 
@@ -1029,7 +1066,14 @@ export default function Home() {
           </div>
         ) : (
         <>
-        <div className="view-heading">
+        {view === "upcoming" && <section className={`upcoming-calendar ${expandedCalendar ? "expanded" : ""}`}>
+          <button className="month-toggle" onClick={() => setExpandedCalendar((value) => !value)}>{new Intl.DateTimeFormat("es-ES", { month: "long", year: "numeric" }).format(new Date())}<span>{expandedCalendar ? "▴" : "▾"}</span></button>
+          <div className="calendar-days">{Array.from({ length: expandedCalendar ? 28 : 7 }, (_, index) => {
+            const date = new Date(); date.setDate(date.getDate() + index); const iso = localISO(date); const hasTasks = tasks.some((task) => !task.completed && task.due === iso);
+            return <button key={iso} className={index === 0 ? "today" : ""} onClick={() => { setQuickTitle(`Tarea para ${iso}`); setShowComposer(true); }}><small>{new Intl.DateTimeFormat("es-ES", { weekday: "narrow" }).format(date)}</small><span>{date.getDate()}</span>{hasTasks && <i />}</button>;
+          })}</div>
+        </section>}
+        <div className="view-heading compact-view-heading">
           <div>
             <p className="eyebrow">{currentEyebrow}</p>
             <h1>{currentTitle}</h1>
@@ -1050,7 +1094,7 @@ export default function Home() {
                 const sectionKey = `${selectedProject}::${section || "sin-seccion"}`;
                 const collapsed = collapsedSections.includes(sectionKey);
                 return <section className="project-section" key={sectionKey}>
-                  <header><button className="section-toggle" onClick={() => setCollapsedSections((current) => current.includes(sectionKey) ? current.filter((item) => item !== sectionKey) : [...current, sectionKey])} aria-expanded={!collapsed}><span>{collapsed ? "›" : "⌄"}</span><strong>{section || "Sin sección"}</strong><small>{sectionTasks.length}</small></button><button className="section-add-task" onClick={() => { setComposerSection(section || undefined); setShowComposer(true); }} aria-label={`Añadir tarea a ${section || "Sin sección"}`}>＋</button></header>
+                  <header><button className="section-toggle" onClick={() => setCollapsedSections((current) => current.includes(sectionKey) ? current.filter((item) => item !== sectionKey) : [...current, sectionKey])} aria-expanded={!collapsed}><span>{collapsed ? "›" : "⌄"}</span><strong>{section || "Sin sección"}</strong><small>{sectionTasks.length}</small></button><button className="section-more" onClick={() => setSectionMenu((current) => current === sectionKey ? null : sectionKey)} aria-label={`Opciones de ${section || "Sin sección"}`}>•••</button>{sectionMenu === sectionKey && <div className="section-menu"><button onClick={() => { setComposerSection(section || undefined); setShowComposer(true); setSectionMenu(null); }}>＋ Añadir tarea</button>{section && <><button onClick={() => moveSection(section, -1)}>↑ Mover arriba</button><button onClick={() => moveSection(section, 1)}>↓ Mover abajo</button><button className="danger" onClick={() => deleteSection(section)}>× Eliminar sección</button></>}</div>}</header>
                   {!collapsed && <div className="section-tasks">{sectionTasks.map((task) => renderTaskCard(task))}{!sectionTasks.length && <p className="section-empty">Todavía no hay tareas en esta sección.</p>}</div>}
                 </section>;
               })}
@@ -1075,7 +1119,7 @@ export default function Home() {
       <nav className="bottom-nav" aria-label="Navegación principal">
         <button className={view === "inbox" && !selectedProject && !selectedLabel && !selectedFilter && !searchQuery ? "active" : ""} onClick={() => changeView("inbox")}><span className="nav-icon">▱</span><span>Bandeja</span>{counts.inbox > 0 && <b>{counts.inbox}</b>}</button>
         <button className={view === "today" && !selectedProject && !selectedLabel && !selectedFilter && !searchQuery ? "active" : ""} onClick={() => changeView("today")}><span className="calendar-icon">{new Date().getDate()}</span><span>Hoy</span>{counts.today > 0 && <b>{counts.today}</b>}</button>
-        <button className={view === "upcoming" && !selectedProject && !selectedLabel && !selectedFilter && !searchQuery ? "active" : ""} onClick={() => changeView("upcoming")}><span className="nav-icon">⌁</span><span>Próximas</span></button>
+        <button className={view === "upcoming" && !selectedProject && !selectedLabel && !selectedFilter && !searchQuery ? "active" : ""} onClick={() => changeView("upcoming")}><span className="nav-icon">▦</span><span>Próximo</span></button>
         <button className={view === "browse" ? "active" : ""} onClick={() => changeView("browse")}><span className="browse-nav-icon"><i /><i /><i /></span><span>Explorar</span></button>
       </nav>
 
@@ -1091,6 +1135,13 @@ export default function Home() {
           </section>
         </div>
       )}
+
+      {showSettings && <div className="settings-screen">
+        <header><button onClick={() => setShowSettings(false)} aria-label="Volver">‹</button><h2>Configuración</h2></header>
+        <section><h3>Personalización</h3><button onClick={() => setTheme((current) => current === "dark" ? "light" : "dark")}><span>◐</span><div><strong>Tema</strong><small>{theme === "dark" ? "Oscuro" : "Claro"}</small></div><b>›</b></button><button><span>▣</span><div><strong>Barra de navegación</strong><small>Bandeja, Hoy, Próximo y Explorar</small></div><b>›</b></button><button onClick={openRamble}><span>≋</span><div><strong>Descarga mental</strong><small>Captura rápida por voz</small></div><b>›</b></button></section>
+        <section><h3>Productividad</h3><button onClick={() => { setShowCalendar(true); setShowSettings(false); }}><span>▦</span><div><strong>Calendario</strong><small>{googleConnected ? "Google Calendar conectado" : "Configurar Google Calendar"}</small></div><b>›</b></button><button><span>◷</span><div><strong>Recordatorios</strong><small>Fechas y horas de tus tareas</small></div><b>›</b></button></section>
+        <section><h3>Datos</h3><button onClick={exportBackup}><span>⇩</span><div><strong>Crear copia de seguridad</strong><small>Guarda proyectos, secciones y tareas</small></div><b>›</b></button><button onClick={() => importRef.current?.click()}><span>⇧</span><div><strong>Restaurar copia</strong><small>Recupera una copia de Brisa</small></div><b>›</b></button>{!isStandalone && <button onClick={installAndroidApp}><span>＋</span><div><strong>Instalar Brisa</strong><small>Añadir a la pantalla de inicio</small></div><b>›</b></button>}</section>
+      </div>}
 
       {showCalendar && (
         <div className="sheet-backdrop calendar-backdrop" onMouseDown={(event) => event.target === event.currentTarget && setShowCalendar(false)}>
@@ -1127,8 +1178,9 @@ export default function Home() {
           <div className="sheet-backdrop" onMouseDown={(event) => event.target === event.currentTarget && setEditingTaskId(null)}>
             <section className="task-editor sheet" aria-label={`Editar ${task.title}`}>
               <div className="sheet-handle" />
-              <div className="editor-heading"><div><p>Editar tarea</p><h2>{task.title}</h2></div><button onClick={() => setEditingTaskId(null)} aria-label="Cerrar editor">×</button></div>
+              <div className="editor-heading"><div><p># {task.project}{task.section ? ` / ${task.section}` : ""}</p><h2>Detalles de la tarea</h2></div><button onClick={() => setEditingTaskId(null)} aria-label="Cerrar editor">×</button></div>
               <label className="editor-title">Nombre<input autoFocus value={task.title} onChange={(event) => updateTask(task.id, { title: event.target.value })} /></label>
+              <label className="editor-description">Descripción<textarea value={task.description || ""} onChange={(event) => updateTask(task.id, { description: event.target.value || undefined })} placeholder="Añade notas, enlaces o contexto" /></label>
               <div className="editor-grid">
                 <label>Fecha<input type="date" value={task.due || ""} onChange={(event) => updateTask(task.id, { due: event.target.value || undefined })} /></label>
                 <label>Hora<input type="time" value={task.time || ""} onChange={(event) => updateTask(task.id, { time: event.target.value || undefined })} /></label>

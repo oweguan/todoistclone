@@ -6,11 +6,11 @@ export const metadata: Metadata = {
   description: "Gestor personal de tareas local con captura inteligente por voz.",
   manifest: "/manifest.webmanifest",
   icons: { icon: "/brisa-48.png", apple: "/brisa-192.png" },
-  appleWebApp: { capable: true, statusBarStyle: "default", title: "Brisa" },
+  appleWebApp: { capable: true, statusBarStyle: "black-translucent", title: "Brisa" },
 };
 
 export const viewport: Viewport = {
-  themeColor: "#f7f5ef",
+  themeColor: "#302e29",
   width: "device-width",
   initialScale: 1,
   maximumScale: 1,

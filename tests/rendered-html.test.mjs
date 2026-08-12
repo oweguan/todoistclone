@@ -18,7 +18,7 @@ test("renders Brisa with its essential mobile flows", async () => {
   assert.match(html, /<title>Brisa/);
   assert.match(html, /Descarga mental/);
   assert.match(html, /Bandeja/);
-  assert.match(html, /Próximas/);
+  assert.match(html, /Próximo/);
   assert.match(html, /Explorar/);
   assert.match(html, /manifest\.webmanifest/);
   assert.doesNotMatch(html, /codex-preview|Starter Project|Your site is taking shape/);
