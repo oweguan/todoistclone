@@ -68,6 +68,13 @@ test("keeps tasks local and supports voice and portable backups", async () => {
   assert.match(page, /Mantén pulsado y arrastra/);
   assert.match(page, /Mover a otro proyecto/);
   assert.match(page, /Vista.*tablero/);
+  assert.match(page, /drag-card-ghost/);
+  assert.match(page, /drag-destination-dock/);
+  assert.match(page, /data-project-drop/);
+  assert.match(page, /data-date-drop/);
+  assert.match(page, /Agrupar:/);
+  assert.match(page, /Seleccionar tareas/);
+  assert.match(page, /completeSelectedTasks/);
   assert.match(page, /function moveTask/);
   assert.match(page, /SECTIONS_KEY/);
   assert.match(page, /PROJECTS_KEY/);

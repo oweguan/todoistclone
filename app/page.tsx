@@ -7,8 +7,10 @@ type SmartFilter = "priority-1" | "no-date";
 type Priority = 1 | 2 | 3 | 4;
 type ProjectDetails = { description?: string; favorite?: boolean; archived?: boolean; color?: string; layout?: "list" | "board" };
 type SectionDetails = { description?: string; archived?: boolean };
-type SectionDialog = { mode: "create" | "edit" | "move"; section?: string; name: string; description: string; targetProject: string };
-type DragState = { kind: "task" | "section" | "subtask"; id: string; overSection?: string; overTask?: string; after?: boolean; active: boolean };
+type SectionDialog = { mode: "create" | "edit" | "move"; project: string; section?: string; name: string; description: string; targetProject: string };
+type DragState = { kind: "task" | "section" | "subtask"; id: string; overProject?: string; overSection?: string; overTask?: string; overDate?: string; after?: boolean; active: boolean; x: number; y: number };
+type ViewGroup = "none" | "project" | "section";
+type ViewSort = "manual" | "date" | "priority";
 type SavedFilter = { id: string; name: string; query: string; favorite?: boolean };
 type TaskComment = { id: string; text: string; createdAt: string };
 type InstallPromptEvent = Event & { prompt: () => Promise<void>; userChoice: Promise<{ outcome: "accepted" | "dismissed" }> };
@@ -50,6 +52,7 @@ const SECTIONS_KEY = "brisa.sections.v1";
 const PROJECT_DETAILS_KEY = "brisa.project-details.v1";
 const SECTION_DETAILS_KEY = "brisa.section-details.v1";
 const FILTERS_KEY = "brisa.filters.v1";
+const VIEW_OPTIONS_KEY = "brisa.view-options.v1";
 const PROJECTS = ["Bandeja de entrada", "Personal", "Trabajo", "Administración"];
 
 const seedTasks: Task[] = [
@@ -424,6 +427,11 @@ export default function Home() {
   const [newSectionName, setNewSectionName] = useState("");
   const [sectionDialog, setSectionDialog] = useState<SectionDialog | null>(null);
   const [dragState, setDragState] = useState<DragState | null>(null);
+  const [viewGroup, setViewGroup] = useState<ViewGroup>("none");
+  const [viewSort, setViewSort] = useState<ViewSort>("manual");
+  const [selectionMode, setSelectionMode] = useState(false);
+  const [selectedTaskIds, setSelectedTaskIds] = useState<string[]>([]);
+  const [bulkProject, setBulkProject] = useState("Bandeja de entrada");
   const [collapsedSections, setCollapsedSections] = useState<string[]>([]);
   const [sectionMenu, setSectionMenu] = useState<string | null>(null);
   const [subtaskTitle, setSubtaskTitle] = useState("");
@@ -449,7 +457,7 @@ export default function Home() {
   const silentGainRef = useRef<GainNode | null>(null);
   const pcmChunksRef = useRef<Float32Array[]>([]);
   const sampleRateRef = useRef(48000);
-  const dragOriginRef = useRef<{ x: number; y: number } | null>(null);
+  const dragOriginRef = useRef<{ x: number; y: number; lastY: number; startedAt: number; scrolling: boolean } | null>(null);
   const dragStateRef = useRef<DragState | null>(null);
   const transcriberRef = useRef<Promise<any> | null>(null);
   const googleClientIdRef = useRef("");
@@ -460,6 +468,11 @@ export default function Home() {
     const standalone = window.matchMedia("(display-mode: standalone)").matches;
     setIsStandalone(standalone);
     setTheme(localStorage.getItem("brisa.theme") === "light" ? "light" : "dark");
+    try {
+      const options = JSON.parse(localStorage.getItem(VIEW_OPTIONS_KEY) || "{}");
+      if (["none", "project", "section"].includes(options.group)) setViewGroup(options.group);
+      if (["manual", "date", "priority"].includes(options.sort)) setViewSort(options.sort);
+    } catch { /* keep default view options */ }
     const captureInstallPrompt = (event: Event) => { event.preventDefault(); setInstallPrompt(event as InstallPromptEvent); };
     window.addEventListener("beforeinstallprompt", captureInstallPrompt);
     const saved = localStorage.getItem(STORAGE_KEY);
@@ -490,7 +503,7 @@ export default function Home() {
       } catch { /* keep starter tasks */ }
     }
     setHydrated(true);
-    if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=16", { updateViaCache: "none" }).then((registration) => registration.update()).catch(() => undefined);
+    if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=19", { updateViaCache: "none" }).then((registration) => registration.update()).catch(() => undefined);
     const action = new URLSearchParams(window.location.search).get("action");
     if (action === "ramble") window.setTimeout(openRamble, 0);
     if (action === "add") window.setTimeout(() => setShowComposer(true), 0);
@@ -520,6 +533,10 @@ export default function Home() {
     localStorage.setItem(SECTION_DETAILS_KEY, JSON.stringify(sectionDetails));
     localStorage.setItem(FILTERS_KEY, JSON.stringify(savedFilters));
   }, [projectDetails, sectionDetails, savedFilters, hydrated]);
+
+  useEffect(() => {
+    if (hydrated) localStorage.setItem(VIEW_OPTIONS_KEY, JSON.stringify({ group: viewGroup, sort: viewSort }));
+  }, [viewGroup, viewSort, hydrated]);
 
   useEffect(() => {
     if (!hydrated || typeof Notification === "undefined" || Notification.permission !== "granted") return;
@@ -556,12 +573,21 @@ export default function Home() {
     }
     const query = searchQuery.trim().toLocaleLowerCase("es");
     if (query) result = result.filter((task) => [task.title, task.description || "", task.project, ...task.labels].join(" ").toLocaleLowerCase("es").includes(query));
-    if (selectedProject) result = result.filter((task) => !task.parentId);
+    result = result.filter((task) => !task.parentId);
     return result;
   }, [tasks, view, searchQuery, selectedProject, selectedLabel, selectedFilter, selectedSavedFilter, savedFilters, showCompletedInProject]);
 
   const availableLabels = useMemo(() => Array.from(new Set(tasks.flatMap((task) => task.labels))).sort((a, b) => a.localeCompare(b, "es")), [tasks]);
   const calendarTasks = useMemo(() => tasks.filter((task) => !task.completed && task.due).sort((a, b) => `${a.due}${a.time || ""}`.localeCompare(`${b.due}${b.time || ""}`)), [tasks]);
+  const displayTasks = useMemo(() => {
+    const isSectionView = Boolean(selectedProject || (view === "inbox" && !selectedLabel && !selectedFilter && !selectedSavedFilter && !searchQuery));
+    if (isSectionView) return visibleTasks;
+    if (viewSort === "date") return [...visibleTasks].sort((a, b) => `${a.due || "9999"}${a.time || ""}`.localeCompare(`${b.due || "9999"}${b.time || ""}`));
+    if (viewSort === "priority") return [...visibleTasks].sort((a, b) => a.priority - b.priority);
+    return visibleTasks;
+  }, [visibleTasks, viewSort, selectedProject, view, selectedLabel, selectedFilter, selectedSavedFilter, searchQuery]);
+  const plainInbox = view === "inbox" && !selectedProject && !selectedLabel && !selectedFilter && !selectedSavedFilter && !searchQuery;
+  const sectionProject = selectedProject || (plainInbox ? "Bandeja de entrada" : null);
 
   const counts = {
     inbox: tasks.filter((task) => !task.completed && task.project === "Bandeja de entrada").length,
@@ -574,7 +600,7 @@ export default function Home() {
     const parsed = parseThoughts(quickTitle)[0];
     const task = parsed || { id: uid(), title: quickTitle.trim(), project: "Bandeja de entrada", priority: 4 as Priority, labels: [], completed: false, createdAt: new Date().toISOString() };
     const preparedTask = { ...task, ...(composerDue ? { due: composerDue } : {}) };
-    setTasks((current) => [...current, selectedProject ? { ...preparedTask, project: selectedProject, section: composerSection } : preparedTask]);
+    setTasks((current) => [...current, sectionProject ? { ...preparedTask, project: sectionProject, section: composerSection } : preparedTask]);
     setQuickTitle("");
     setComposerSection(undefined);
     setComposerDue(undefined);
@@ -798,73 +824,74 @@ export default function Home() {
   }
 
   function addSection(nameOverride?: string) {
-    if (!selectedProject) return;
+    if (!sectionProject) return;
     const name = nameOverride?.trim() || newSectionName.trim();
-    if (!name || (projectSections[selectedProject] || []).length >= 20 || (projectSections[selectedProject] || []).some((section) => section.toLocaleLowerCase("es") === name.toLocaleLowerCase("es"))) return;
-    setProjectSections((current) => ({ ...current, [selectedProject]: [...(current[selectedProject] || []), name] }));
+    if (!name || (projectSections[sectionProject] || []).length >= 20 || (projectSections[sectionProject] || []).some((section) => section.toLocaleLowerCase("es") === name.toLocaleLowerCase("es"))) return;
+    setProjectSections((current) => ({ ...current, [sectionProject]: [...(current[sectionProject] || []), name] }));
     setNewSectionName("");
     flash("Sección añadida");
   }
 
-  function openSectionDialog(mode: SectionDialog["mode"], section?: string) {
-    if (!selectedProject) return;
-    const details = section ? sectionDetails[sectionKey(selectedProject, section)] : undefined;
+  function openSectionDialog(mode: SectionDialog["mode"], section?: string, projectOverride?: string) {
+    const project = projectOverride || sectionProject || projects.find((item) => item !== "Bandeja de entrada" && !projectDetails[item]?.archived) || "Bandeja de entrada";
+    const details = section ? sectionDetails[sectionKey(project, section)] : undefined;
     setSectionMenu(null);
-    const targetProject = mode === "move" ? projects.find((project) => project !== selectedProject && project !== "Bandeja de entrada" && !projectDetails[project]?.archived) || "" : selectedProject;
-    setSectionDialog({ mode, section, name: section || "", description: details?.description || "", targetProject });
+    const targetProject = mode === "move" ? projects.find((item) => item !== project && !projectDetails[item]?.archived) || "" : project;
+    setSectionDialog({ mode, project, section, name: section || "", description: details?.description || "", targetProject });
   }
 
   function saveSectionDialog() {
-    if (!selectedProject || !sectionDialog) return;
+    if (!sectionDialog) return;
+    const sourceProject = sectionDialog.project;
     if (sectionDialog.mode === "create") {
       const name = sectionDialog.name.trim();
-      if (!name || (projectSections[selectedProject] || []).length >= 20 || (projectSections[selectedProject] || []).some((section) => section.toLocaleLowerCase("es") === name.toLocaleLowerCase("es"))) return;
-      setProjectSections((current) => ({ ...current, [selectedProject]: [...(current[selectedProject] || []), name] }));
-      if (sectionDialog.description.trim()) setSectionDetails((current) => ({ ...current, [sectionKey(selectedProject, name)]: { description: sectionDialog.description.trim() } }));
+      if (!name || (projectSections[sourceProject] || []).length >= 20 || (projectSections[sourceProject] || []).some((section) => section.toLocaleLowerCase("es") === name.toLocaleLowerCase("es"))) return;
+      setProjectSections((current) => ({ ...current, [sourceProject]: [...(current[sourceProject] || []), name] }));
+      if (sectionDialog.description.trim()) setSectionDetails((current) => ({ ...current, [sectionKey(sourceProject, name)]: { description: sectionDialog.description.trim() } }));
       setSectionDialog(null); flash("Sección añadida"); return;
     }
     const oldSection = sectionDialog.section;
     if (!oldSection) return;
     if (sectionDialog.mode === "move") {
       const target = sectionDialog.targetProject;
-      if (!target || target === selectedProject) { setSectionDialog(null); return; }
+      if (!target || target === sourceProject) { setSectionDialog(null); return; }
       const targetSections = projectSections[target] || [];
       if (targetSections.length >= 20) { flash("El proyecto de destino ya tiene 20 secciones"); return; }
       let movedName = oldSection; let suffix = 2;
       while (targetSections.some((item) => item.toLocaleLowerCase("es") === movedName.toLocaleLowerCase("es"))) movedName = `${oldSection} (${suffix++})`;
-      setProjectSections((current) => ({ ...current, [selectedProject]: (current[selectedProject] || []).filter((item) => item !== oldSection), [target]: [...(current[target] || []), movedName] }));
-      setTasks((current) => current.map((task) => task.project === selectedProject && task.section === oldSection ? { ...task, project: target, section: movedName } : task));
-      const oldKey = sectionKey(selectedProject, oldSection); const newKey = sectionKey(target, movedName);
+      setProjectSections((current) => ({ ...current, [sourceProject]: (current[sourceProject] || []).filter((item) => item !== oldSection), [target]: [...(current[target] || []), movedName] }));
+      setTasks((current) => current.map((task) => task.project === sourceProject && task.section === oldSection ? { ...task, project: target, section: movedName } : task));
+      const oldKey = sectionKey(sourceProject, oldSection); const newKey = sectionKey(target, movedName);
       setSectionDetails((current) => { const next = { ...current, [newKey]: current[oldKey] || {} }; delete next[oldKey]; return next; });
       setSectionDialog(null); flash(`Sección movida a ${target}`); return;
     }
     const name = sectionDialog.name.trim();
-    if (!name || ((projectSections[selectedProject] || []).some((item) => item !== oldSection && item.toLocaleLowerCase("es") === name.toLocaleLowerCase("es")))) return;
-    setProjectSections((current) => ({ ...current, [selectedProject]: (current[selectedProject] || []).map((item) => item === oldSection ? name : item) }));
-    setTasks((current) => current.map((task) => task.project === selectedProject && task.section === oldSection ? { ...task, section: name } : task));
-    const oldKey = sectionKey(selectedProject, oldSection); const newKey = sectionKey(selectedProject, name);
+    if (!name || ((projectSections[sourceProject] || []).some((item) => item !== oldSection && item.toLocaleLowerCase("es") === name.toLocaleLowerCase("es")))) return;
+    setProjectSections((current) => ({ ...current, [sourceProject]: (current[sourceProject] || []).map((item) => item === oldSection ? name : item) }));
+    setTasks((current) => current.map((task) => task.project === sourceProject && task.section === oldSection ? { ...task, section: name } : task));
+    const oldKey = sectionKey(sourceProject, oldSection); const newKey = sectionKey(sourceProject, name);
     setSectionDetails((current) => { const next = { ...current, [newKey]: { ...current[oldKey], description: sectionDialog.description.trim() || undefined } }; if (oldKey !== newKey) delete next[oldKey]; return next; });
     setSectionDialog(null); flash("Sección actualizada");
   }
 
   function moveSection(section: string, direction: -1 | 1) {
-    if (!selectedProject) return;
+    if (!sectionProject) return;
     setProjectSections((current) => {
-      const sections = [...(current[selectedProject] || [])];
+      const sections = [...(current[sectionProject] || [])];
       const index = sections.indexOf(section);
       const target = index + direction;
       if (index < 0 || target < 0 || target >= sections.length) return current;
       [sections[index], sections[target]] = [sections[target], sections[index]];
-      return { ...current, [selectedProject]: sections };
+      return { ...current, [sectionProject]: sections };
     });
     setSectionMenu(null);
   }
 
   function deleteSection(section: string) {
-    if (!selectedProject) return;
+    if (!sectionProject) return;
     if (!window.confirm(`Eliminar “${section}” y todas sus tareas? Esta acción no se puede deshacer.`)) return;
-    setProjectSections((current) => ({ ...current, [selectedProject]: (current[selectedProject] || []).filter((item) => item !== section) }));
-    setTasks((current) => current.filter((task) => !(task.project === selectedProject && task.section === section)));
+    setProjectSections((current) => ({ ...current, [sectionProject]: (current[sectionProject] || []).filter((item) => item !== section) }));
+    setTasks((current) => current.filter((task) => !(task.project === sectionProject && task.section === section)));
     setSectionMenu(null);
     flash("Sección y tareas eliminadas");
   }
@@ -880,21 +907,25 @@ export default function Home() {
   }
 
   function duplicateSection(section: string) {
-    if (!selectedProject) return;
-    const copyName = `Copia de ${section}`;
-    setProjectSections((current) => ({ ...current, [selectedProject]: [...(current[selectedProject] || []), copyName] }));
-    const originals = tasks.filter((task) => task.project === selectedProject && task.section === section && !task.completed);
+    if (!sectionProject) return;
+    const existing = projectSections[sectionProject] || [];
+    if (existing.length >= 20) { flash("Este proyecto ya tiene 20 secciones"); return; }
+    let copyName = `Copia de ${section}`; let suffix = 2;
+    while (existing.some((item) => item.toLocaleLowerCase("es") === copyName.toLocaleLowerCase("es"))) copyName = `Copia de ${section} (${suffix++})`;
+    setProjectSections((current) => ({ ...current, [sectionProject]: [...(current[sectionProject] || []), copyName] }));
+    setSectionDetails((current) => ({ ...current, [sectionKey(sectionProject, copyName)]: { ...current[sectionKey(sectionProject, section)], archived: false } }));
+    const originals = tasks.filter((task) => task.project === sectionProject && task.section === section && !task.completed);
     const idMap = new Map(originals.map((task) => [task.id, uid()]));
     setTasks((current) => [...current, ...originals.map((task) => ({ ...task, id: idMap.get(task.id)!, section: copyName, parentId: task.parentId ? idMap.get(task.parentId) : undefined, comments: [], createdAt: new Date().toISOString() }))]);
     setSectionMenu(null); flash("Sección duplicada");
   }
 
   function archiveSection(section: string) {
-    if (!selectedProject) return;
-    const key = sectionKey(selectedProject, section);
+    if (!sectionProject) return;
+    const key = sectionKey(sectionProject, section);
     const archived = Boolean(sectionDetails[key]?.archived);
     setSectionDetails((current) => ({ ...current, [key]: { ...current[key], archived: !archived } }));
-    if (!archived) setTasks((current) => current.map((task) => task.project === selectedProject && task.section === section ? { ...task, completed: true, completedAt: new Date().toISOString() } : task));
+    if (!archived) setTasks((current) => current.map((task) => task.project === sectionProject && task.section === section ? { ...task, completed: true, completedAt: new Date().toISOString() } : task));
     setSectionMenu(null); flash(archived ? "Sección restaurada" : "Sección archivada");
   }
 
@@ -911,7 +942,8 @@ export default function Home() {
   }
 
   async function copyBrisaLink(kind: "project" | "section" | "task", value: string) {
-    const url = `${window.location.origin}${window.location.pathname}#${kind}=${encodeURIComponent(value)}`;
+    const normalizedValue = kind === "section" && value.startsWith("null/") ? `Bandeja de entrada/${value.slice(5)}` : value;
+    const url = `${window.location.origin}${window.location.pathname}#${kind}=${encodeURIComponent(normalizedValue)}`;
     try { await navigator.clipboard.writeText(url); flash("Enlace copiado"); } catch { flash("No se pudo copiar el enlace"); }
   }
 
@@ -957,38 +989,51 @@ export default function Home() {
   }
 
   function beginDrag(event: ReactPointerEvent<HTMLElement>, kind: DragState["kind"], id: string) {
-    if (!selectedProject && kind !== "subtask") return;
     event.preventDefault();
     event.stopPropagation();
     event.currentTarget.setPointerCapture(event.pointerId);
-    dragOriginRef.current = { x: event.clientX, y: event.clientY };
-    setCurrentDrag({ kind, id, active: false });
+    dragOriginRef.current = { x: event.clientX, y: event.clientY, lastY: event.clientY, startedAt: performance.now(), scrolling: false };
+    setCurrentDrag({ kind, id, active: false, x: event.clientX, y: event.clientY });
   }
 
   function updateDrag(event: ReactPointerEvent<HTMLElement>) {
     const current = dragStateRef.current;
     const origin = dragOriginRef.current;
     if (!current || !origin) return;
-    const active = current.active || Math.hypot(event.clientX - origin.x, event.clientY - origin.y) > 5;
+    const distance = Math.hypot(event.clientX - origin.x, event.clientY - origin.y);
+    if (!current.active && (origin.scrolling || (performance.now() - origin.startedAt < 240 && distance > 5))) {
+      origin.scrolling = true;
+      window.scrollBy({ top: origin.lastY - event.clientY });
+      origin.lastY = event.clientY;
+      return;
+    }
+    if (!current.active && performance.now() - origin.startedAt < 240) return;
+    const active = current.active || distance > 5;
     if (!active) return;
     event.preventDefault();
-    if (projectLayout === "board") {
+    if (event.clientY < 72) window.scrollBy({ top: -16 });
+    if (event.clientY > window.innerHeight - 118) window.scrollBy({ top: 16 });
+    if (sectionProject && projectLayout === "board") {
       const board = document.querySelector<HTMLElement>(".project-layout-board");
       if (board && event.clientX < 55) board.scrollBy({ left: -18 });
       if (board && event.clientX > window.innerWidth - 55) board.scrollBy({ left: 18 });
     }
     const element = document.elementFromPoint(event.clientX, event.clientY) as HTMLElement | null;
+    const projectElement = element?.closest<HTMLElement>("[data-project-drop]");
     const sectionElement = element?.closest<HTMLElement>("[data-section-drop]");
-    const overSection = sectionElement?.dataset.sectionDrop || "";
+    const dateElement = element?.closest<HTMLElement>("[data-date-drop]");
+    const overProject = projectElement?.dataset.projectDrop;
+    const overSection = sectionElement ? sectionElement.dataset.sectionDrop || "" : undefined;
+    const overDate = dateElement?.dataset.dateDrop;
     if (current.kind === "task" || current.kind === "subtask") {
       const taskElement = element?.closest<HTMLElement>(current.kind === "subtask" ? "[data-subtask-drop]" : "[data-task-drop]");
       const overTask = current.kind === "subtask" ? taskElement?.dataset.subtaskDrop : taskElement?.dataset.taskDrop;
       const after = taskElement ? event.clientY > taskElement.getBoundingClientRect().top + taskElement.getBoundingClientRect().height / 2 : false;
-      setCurrentDrag({ ...current, active: true, overSection, overTask: overTask === current.id ? undefined : overTask, after });
+      setCurrentDrag({ ...current, active: true, x: event.clientX, y: event.clientY, overProject, overSection, overDate, overTask: overTask === current.id ? undefined : overTask, after });
     } else {
       const rect = sectionElement?.getBoundingClientRect();
       const after = rect ? projectLayout === "board" ? event.clientX > rect.left + rect.width / 2 : event.clientY > rect.top + rect.height / 2 : false;
-      setCurrentDrag({ ...current, active: true, overSection: overSection === current.id ? undefined : overSection, after });
+      setCurrentDrag({ ...current, active: true, x: event.clientX, y: event.clientY, overProject, overSection: overSection === current.id ? undefined : overSection, after });
     }
   }
 
@@ -1000,9 +1045,19 @@ export default function Home() {
       return;
     }
     const current = dragStateRef.current;
+    const origin = dragOriginRef.current;
     try { event.currentTarget.releasePointerCapture(event.pointerId); } catch { /* pointer already released */ }
     dragOriginRef.current = null;
     setCurrentDrag(null);
+    if (current?.kind === "task" && !current.active && origin?.scrolling) {
+      const deltaX = event.clientX - origin.x;
+      const deltaY = event.clientY - origin.y;
+      if (Math.abs(deltaX) > 88 && Math.abs(deltaX) > Math.abs(deltaY) * 1.35) {
+        if (deltaX > 0) void toggleTask(current.id);
+        else { setSubtaskTitle(""); setEditingTaskId(current.id); }
+        return;
+      }
+    }
     if (!current?.active) return;
     if (current.kind === "subtask" && current.overTask) {
       setTasks((all) => {
@@ -1018,15 +1073,27 @@ export default function Home() {
       flash("Subtareas reordenadas");
       return;
     }
-    if (!selectedProject) return;
-    if (current.kind === "section" && current.overSection) {
-      setProjectSections((all) => ({ ...all, [selectedProject]: reorderSectionsList(all[selectedProject] || [], current.id, current.overSection!, current.after) }));
+    if (current.kind === "section" && current.overSection && sectionProject) {
+      setProjectSections((all) => ({ ...all, [sectionProject]: reorderSectionsList(all[sectionProject] || [], current.id, current.overSection!, current.after) }));
       flash("Secciones reordenadas");
       return;
     }
     if (current.kind === "task") {
-      setTasks((all) => moveTaskCard(all, current.id, selectedProject, current.overSection || undefined, current.overTask, current.after));
-      flash("Tarea movida");
+      if (!current.overProject && !current.overTask && current.overSection === undefined && !current.overDate) return;
+      setTasks((all) => {
+        const dragged = all.find((task) => task.id === current.id);
+        if (!dragged) return all;
+        const hasDestination = Boolean(current.overProject || current.overTask || current.overSection !== undefined);
+        const targetProject = current.overProject || dragged.project;
+        const targetSection = current.overSection !== undefined ? current.overSection || undefined : dragged.section;
+        const moved = hasDestination ? moveTaskCard(all, current.id, targetProject, targetSection, current.overTask, current.after) : all;
+        if (!current.overDate) return moved;
+        const familyIds = new Set([current.id]);
+        let expanded = true;
+        while (expanded) { expanded = false; moved.forEach((task) => { if (task.parentId && familyIds.has(task.parentId) && !familyIds.has(task.id)) { familyIds.add(task.id); expanded = true; } }); }
+        return moved.map((task) => familyIds.has(task.id) ? { ...task, due: current.overDate } : task);
+      });
+      flash(current.overDate ? "Tarea movida y reprogramada" : "Tarea movida");
     }
   }
 
@@ -1036,6 +1103,36 @@ export default function Home() {
     setTasks((current) => [...current, { id: uid(), title, project: parent.project, section: parent.section, parentId: parent.id, due: parent.due, priority: 4, labels: [], completed: false, createdAt: new Date().toISOString() }]);
     setSubtaskTitle("");
     flash("Subtarea añadida");
+  }
+
+  function toggleSelectionMode() {
+    setSelectionMode((current) => !current);
+    setSelectedTaskIds([]);
+    setShowMenu(false);
+  }
+
+  function selectedFamilies(all: Task[]) {
+    const ids = new Set(selectedTaskIds);
+    let expanded = true;
+    while (expanded) { expanded = false; all.forEach((task) => { if (task.parentId && ids.has(task.parentId) && !ids.has(task.id)) { ids.add(task.id); expanded = true; } }); }
+    return ids;
+  }
+
+  function completeSelectedTasks() {
+    const completedAt = new Date().toISOString();
+    setTasks((all) => { const ids = selectedFamilies(all); return all.map((task) => ids.has(task.id) ? { ...task, completed: true, completedAt } : task); });
+    setSelectedTaskIds([]); setSelectionMode(false); flash("Tareas completadas");
+  }
+
+  function moveSelectedTasks() {
+    setTasks((all) => { const ids = selectedFamilies(all); return all.map((task) => ids.has(task.id) ? { ...task, project: bulkProject, section: undefined } : task); });
+    setSelectedTaskIds([]); setSelectionMode(false); flash(`Tareas movidas a ${bulkProject}`);
+  }
+
+  function deleteSelectedTasks() {
+    if (!window.confirm(`Eliminar ${selectedTaskIds.length} tareas seleccionadas?`)) return;
+    setTasks((all) => { const ids = selectedFamilies(all); return all.filter((task) => !ids.has(task.id)); });
+    setSelectedTaskIds([]); setSelectionMode(false); flash("Tareas eliminadas");
   }
 
   function openRamble() {
@@ -1282,11 +1379,11 @@ export default function Home() {
   }
 
   function renderTaskCard(task: Task, nested = false) {
-    const children = selectedProject ? tasks.filter((item) => item.parentId === task.id && !item.completed) : [];
+    const children = tasks.filter((item) => item.parentId === task.id && !item.completed);
     return (
-      <div data-task-drop={selectedProject && !nested ? task.id : undefined} className={`task-family ${nested ? "nested" : ""} ${dragState?.id === task.id ? "is-dragging" : ""} ${dragState?.overTask === task.id ? dragState.after ? "drop-after" : "drop-before" : ""}`} key={task.id}>
-        <article className={`task-card p${task.priority}`}>
-          {selectedProject && !nested && <button className="task-drag-handle" onPointerDown={(event) => beginDrag(event, "task", task.id)} onPointerMove={updateDrag} onPointerUp={finishDrag} onPointerCancel={finishDrag} aria-label={`Mantén pulsado y arrastra ${task.title}`}>⠿</button>}
+      <div data-task-drop={!nested ? task.id : undefined} className={`task-family ${nested ? "nested" : ""} ${selectedTaskIds.includes(task.id) ? "selected" : ""} ${dragState?.id === task.id ? "is-dragging" : ""} ${dragState?.overTask === task.id ? dragState.after ? "drop-after" : "drop-before" : ""}`} key={task.id}>
+        <article className={`task-card p${task.priority}`} onPointerDown={(event) => { if (!nested && !selectionMode && !(event.target as HTMLElement).closest("button, input, select, textarea, a")) beginDrag(event, "task", task.id); }} onPointerMove={!nested ? updateDrag : undefined} onPointerUp={!nested ? finishDrag : undefined} onPointerCancel={!nested ? finishDrag : undefined}>
+          {!nested && (selectionMode ? <button className={`task-select-toggle ${selectedTaskIds.includes(task.id) ? "active" : ""}`} onClick={() => setSelectedTaskIds((current) => current.includes(task.id) ? current.filter((id) => id !== task.id) : [...current, task.id])} aria-label={`Seleccionar ${task.title}`}>{selectedTaskIds.includes(task.id) ? "✓" : ""}</button> : <button className="task-drag-handle" onPointerDown={(event) => beginDrag(event, "task", task.id)} onPointerMove={updateDrag} onPointerUp={finishDrag} onPointerCancel={finishDrag} aria-label={`Mantén pulsado y arrastra ${task.title}`}>⠿</button>)}
           <button className="check" onClick={() => void toggleTask(task.id)} disabled={googleBusyTaskId === task.id} aria-label={task.completed ? `Reabrir ${task.title}` : `Completar ${task.title}`}><span>{task.completed ? "✓" : ""}</span></button>
           <div className="task-body">
             <h2 className={task.completed ? "done" : ""}>{task.title}</h2>
@@ -1308,18 +1405,37 @@ export default function Home() {
     );
   }
 
+  function renderSmartTaskList() {
+    if (view === "upcoming") {
+      return Array.from(new Set(displayTasks.map((task) => task.due).filter(Boolean))).map((date) => <section className={`upcoming-day-group ${dragState?.overDate === date ? "drop-date-target" : ""}`} data-date-drop={date} key={date}><header><strong>{new Intl.DateTimeFormat("es-ES", { weekday: "long", day: "numeric", month: "short" }).format(new Date(`${date}T12:00:00`))}</strong>{date === todayISO() && <span>Hoy</span>}{date === addDaysISO(1) && <span>Mañana</span>}<button onClick={() => { setComposerDue(date); setShowComposer(true); }}>＋</button></header>{displayTasks.filter((task) => task.due === date).map((task) => renderTaskCard(task))}</section>);
+    }
+    if (viewGroup === "none") return displayTasks.map((task) => renderTaskCard(task));
+    const groups = new Map<string, { project: string; section?: string; tasks: Task[] }>();
+    displayTasks.forEach((task) => {
+      const key = viewGroup === "project" ? task.project : `${task.project}::${task.section || "sin-seccion"}`;
+      const current = groups.get(key) || { project: task.project, section: viewGroup === "section" ? task.section : undefined, tasks: [] };
+      current.tasks.push(task); groups.set(key, current);
+    });
+    return Array.from(groups.entries()).map(([key, group]) => <section className={`smart-task-group ${dragState?.overProject === group.project && (viewGroup !== "section" || (dragState.overSection || "") === (group.section || "")) ? "drop-section-target" : ""}`} data-project-drop={group.project} data-section-drop={viewGroup === "section" ? group.section || "" : undefined} key={key}><header><div><strong>{viewGroup === "project" ? group.project : group.section || "Sin sección"}</strong>{viewGroup === "section" && <small>{group.project}</small>}</div><span>{group.tasks.length}</span></header>{group.tasks.map((task) => renderTaskCard(task))}</section>);
+  }
+
   const viewNames: Record<View, string> = { inbox: "Bandeja de entrada", today: "Hoy", upcoming: "Próximo", completed: "Completadas", browse: "Explorar" };
   const currentTitle = selectedProject || (selectedLabel ? `@${selectedLabel}` : selectedSavedFilter ? savedFilters.find((item) => item.id === selectedSavedFilter)?.name || "Filtro" : selectedFilter === "priority-1" ? "Prioridad 1" : selectedFilter === "no-date" ? "Sin fecha" : searchQuery ? "Resultados" : viewNames[view]);
   const currentEyebrow = selectedProject ? "Proyecto" : selectedLabel ? "Etiqueta" : selectedFilter || selectedSavedFilter ? "Filtro" : searchQuery ? "Búsqueda" : view === "today" ? new Intl.DateTimeFormat("es-ES", { weekday: "long", day: "numeric", month: "long" }).format(new Date()) : "Tu espacio";
-  const projectLayout = selectedProject ? projectDetails[selectedProject]?.layout || "list" : "list";
+  const projectLayout = sectionProject ? projectDetails[sectionProject]?.layout || "list" : "list";
+  const groupLabels: Record<ViewGroup, string> = { none: "Sin agrupar", project: "Por proyecto", section: "Por sección" };
+  const sortLabels: Record<ViewSort, string> = { manual: "Manual", date: "Fecha", priority: "Prioridad" };
+  const cycleGroup = () => setViewGroup((current) => current === "none" ? "project" : current === "project" ? "section" : "none");
+  const cycleSort = () => setViewSort((current) => current === "manual" ? "date" : current === "date" ? "priority" : "manual");
+  const draggedTask = dragState?.kind === "task" ? tasks.find((task) => task.id === dragState.id) : undefined;
 
   return (
-    <main className={`app-shell theme-${theme}`}>
+    <main className={`app-shell theme-${theme} ${dragState?.active ? "dragging-active" : ""}`}>
       {view !== "browse" && <header className="topbar">
-        <button className="brand current-view-brand" aria-label={selectedProject ? "Volver a Explorar" : "Ir a Hoy"} onClick={() => selectedProject ? changeView("browse") : changeView("today")}>{selectedProject && <span className="back-symbol">‹</span>}<span>{view === "browse" ? "Brisa" : currentTitle}</span></button>
+        <button className="brand current-view-brand" aria-label={selectedProject ? "Volver a Explorar" : "Ir a Hoy"} onClick={() => selectedProject ? changeView("browse") : changeView("today")}>{selectedProject && <span className="back-symbol">‹</span>}<span>{currentTitle}</span></button>
         <div className="top-actions">
           <button className="icon-btn" onClick={openRamble} aria-label="Abrir Descarga mental"><span className="wave-mini">≋</span></button>
-          {selectedProject && <button className="icon-btn layout-toggle" onClick={() => setProjectDetails((current) => ({ ...current, [selectedProject]: { ...current[selectedProject], layout: projectLayout === "list" ? "board" : "list" } }))} aria-label={projectLayout === "list" ? "Cambiar a tablero" : "Cambiar a lista"}>{projectLayout === "list" ? "▦" : "☷"}</button>}
+          {sectionProject && <button className="icon-btn layout-toggle" onClick={() => setProjectDetails((current) => ({ ...current, [sectionProject]: { ...current[sectionProject], layout: projectLayout === "list" ? "board" : "list" } }))} aria-label={projectLayout === "list" ? "Cambiar a tablero" : "Cambiar a lista"}>{projectLayout === "list" ? "▦" : "☷"}</button>}
           <button className="icon-btn" onClick={() => setShowMenu((value) => !value)} aria-label="Abrir menú">•••</button>
         </div>
         {showMenu && (
@@ -1331,10 +1447,14 @@ export default function Home() {
               <button onClick={() => { const description = window.prompt("Descripción del proyecto", projectDetails[selectedProject]?.description || ""); if (description !== null) setProjectDetails((current) => ({ ...current, [selectedProject]: { ...current[selectedProject], description: description.trim() || undefined } })); setShowMenu(false); }}><span>☵</span> Descripción</button>
               <button onClick={() => { setProjectDetails((current) => ({ ...current, [selectedProject]: { ...current[selectedProject], favorite: !current[selectedProject]?.favorite } })); setShowMenu(false); }}><span>♥</span> {projectDetails[selectedProject]?.favorite ? "Quitar de Favoritos" : "Añadir a Favoritos"}</button>
               <button onClick={() => { setShowCompletedInProject((value) => !value); setShowMenu(false); }}><span>✓</span> {showCompletedInProject ? "Ocultar completadas" : "Mostrar completadas"}</button>
+              <button onClick={toggleSelectionMode}><span>☑</span> Seleccionar tareas</button>
               <button onClick={() => { duplicateProject(selectedProject); setShowMenu(false); }}><span>⧉</span> Duplicar proyecto</button>
               <button onClick={() => { setProjectDetails((current) => ({ ...current, [selectedProject]: { ...current[selectedProject], archived: true } })); changeView("browse"); }}><span>⌄</span> Archivar proyecto</button>
               <button className="danger-menu-item" onClick={() => { const project = selectedProject; deleteProject(project); changeView("browse"); }}>× Eliminar proyecto</button>
             </> : <>
+              {plainInbox && <><button onClick={() => { openSectionDialog("create", undefined, "Bandeja de entrada"); setShowMenu(false); }}><span>▣</span> Añadir sección</button><button onClick={() => { setProjectDetails((current) => ({ ...current, ["Bandeja de entrada"]: { ...current["Bandeja de entrada"], layout: projectLayout === "list" ? "board" : "list" } })); setShowMenu(false); }}><span>{projectLayout === "list" ? "▦" : "☷"}</span> Vista {projectLayout === "list" ? "tablero" : "lista"}</button></>}
+              <button onClick={toggleSelectionMode}><span>☑</span> Seleccionar tareas</button>
+              {!plainInbox && <><button onClick={() => { cycleGroup(); setShowMenu(false); }}><span>≡</span> Agrupar: {groupLabels[viewGroup]}</button><button onClick={() => { cycleSort(); setShowMenu(false); }}><span>↕</span> Orden: {sortLabels[viewSort]}</button><button onClick={() => { openSectionDialog("create"); setShowMenu(false); }}><span>▣</span> Crear sección en…</button></>}
               {!isStandalone && <button onClick={installAndroidApp}><span>⇩</span> Instalar en Android</button>}
               <button onClick={() => { setShowSettings(true); setShowMenu(false); }}><span>⚙</span> Configuración</button>
               <div className="menu-divider" />
@@ -1379,42 +1499,44 @@ export default function Home() {
             <p className="eyebrow">{currentEyebrow}</p>
             <h1>{currentTitle}</h1>
           </div>
-          <span className="task-total">{visibleTasks.length}</span>
+          <span className="task-total">{displayTasks.length}</span>
         </div>
         {(searchQuery || selectedLabel || selectedFilter || selectedSavedFilter) && <div className="active-filters"><span>{searchQuery && `“${searchQuery}”`}{selectedLabel && ` · @${selectedLabel}`}{selectedFilter === "priority-1" && " · Prioridad 1"}{selectedFilter === "no-date" && " · Sin fecha"}{selectedSavedFilter && ` · ${savedFilters.find((item) => item.id === selectedSavedFilter)?.name || "Filtro"}`}</span><button onClick={clearOrganizationFilters}>Quitar filtros</button></div>}
 
-        <div className={`task-list ${selectedProject ? `project-task-list project-layout-${projectLayout}` : ""}`}>
-          {selectedProject ? (() => {
-            const configuredSections = (projectSections[selectedProject] || []).filter((section) => showCompletedInProject || !sectionDetails[`${selectedProject}::${section}`]?.archived);
+        <div className={`task-list ${sectionProject ? `project-task-list project-layout-${projectLayout}` : ""}`}>
+          {sectionProject ? (() => {
+            const configuredSections = (projectSections[sectionProject] || []).filter((section) => showCompletedInProject || !sectionDetails[`${sectionProject}::${section}`]?.archived);
             const sectionNames = ["", ...configuredSections];
             return <>
               <button className="add-section-launch" onClick={() => openSectionDialog("create")}>＋ Añadir sección</button>
               <p className="drag-hint">Mantén pulsado ⠿ y arrastra para ordenar o cambiar de sección.</p>
               {sectionNames.map((section) => {
-                const sectionTasks = visibleTasks.filter((task) => (task.section || "") === section);
+                const sectionTasks = displayTasks.filter((task) => (task.section || "") === section);
                 if (!section && !sectionTasks.length && configuredSections.length && projectLayout === "list" && dragState?.kind !== "task") return null;
-                const sectionKey = `${selectedProject}::${section || "sin-seccion"}`;
+                const sectionKey = `${sectionProject}::${section || "sin-seccion"}`;
                 const collapsed = collapsedSections.includes(sectionKey);
-                return <section data-section-drop={section} className={`project-section ${sectionDetails[sectionKey]?.archived ? "archived" : ""} ${dragState?.kind === "section" && dragState.id === section ? "is-dragging" : ""} ${dragState?.overSection === section ? dragState.kind === "task" ? "drop-section-target" : dragState.after ? "drop-after-section" : "drop-before-section" : ""}`} key={sectionKey}>
+                return <section data-project-drop={sectionProject} data-section-drop={section} className={`project-section ${sectionDetails[sectionKey]?.archived ? "archived" : ""} ${dragState?.kind === "section" && dragState.id === section ? "is-dragging" : ""} ${dragState?.overProject === sectionProject && dragState?.overSection === section ? dragState.kind === "task" ? "drop-section-target" : dragState.after ? "drop-after-section" : "drop-before-section" : ""}`} key={sectionKey}>
                   <header>{section ? <button className="section-drag-handle" onPointerDown={(event) => beginDrag(event, "section", section)} onPointerMove={updateDrag} onPointerUp={finishDrag} onPointerCancel={finishDrag} aria-label={`Mantén pulsado y arrastra la sección ${section}`}>⠿</button> : <span className="section-drag-spacer" />}<button className="section-toggle" onClick={() => setCollapsedSections((current) => current.includes(sectionKey) ? current.filter((item) => item !== sectionKey) : [...current, sectionKey])} aria-expanded={!collapsed}><span>{collapsed ? "›" : "⌄"}</span><strong>{section || "Sin sección"}</strong><small>{sectionTasks.length}</small></button><button className="section-more" onClick={() => setSectionMenu((current) => current === sectionKey ? null : sectionKey)} aria-label={`Opciones de ${section || "Sin sección"}`}>•••</button>{sectionMenu === sectionKey && <div className="section-menu"><button onClick={() => { setComposerSection(section || undefined); setShowComposer(true); setSectionMenu(null); }}>＋ Añadir tarea</button>{section && <><button onClick={() => void copyBrisaLink("section", `${selectedProject}/${section}`)}>↗ Copiar enlace</button><button onClick={() => editSection(section)}>✎ Editar sección</button><button onClick={() => describeSection(section)}>☵ Descripción</button><button onClick={() => openSectionDialog("move", section)}>→ Mover a otro proyecto</button><button onClick={() => moveSection(section, -1)}>↑ Mover arriba</button><button onClick={() => moveSection(section, 1)}>↓ Mover abajo</button><button onClick={() => duplicateSection(section)}>⧉ Duplicar sección</button><button onClick={() => archiveSection(section)}>{sectionDetails[sectionKey]?.archived ? "↺ Restaurar sección" : "⌄ Archivar sección"}</button><button className="danger" onClick={() => deleteSection(section)}>× Eliminar sección</button></>}</div>}</header>
                   {section && sectionDetails[sectionKey]?.description && <button className="section-description" onClick={() => describeSection(section)}>{sectionDetails[sectionKey]?.description}</button>}
                   {!collapsed && <div className="section-tasks">{sectionTasks.map((task) => renderTaskCard(task))}{!sectionTasks.length && <p className="section-empty">Todavía no hay tareas en esta sección.</p>}<button className="section-inline-add" onClick={() => { setComposerSection(section || undefined); setShowComposer(true); }}>＋ Añadir tarea</button></div>}
                 </section>;
               })}
             </>;
-          })() : view === "upcoming" ? Array.from(new Set(visibleTasks.map((task) => task.due).filter(Boolean))).map((date) => <section className="upcoming-day-group" key={date}><header><strong>{new Intl.DateTimeFormat("es-ES", { weekday: "long", day: "numeric", month: "short" }).format(new Date(`${date}T12:00:00`))}</strong>{date === todayISO() && <span>Hoy</span>}{date === addDaysISO(1) && <span>Mañana</span>}<button onClick={() => { setComposerDue(date); setShowComposer(true); }}>＋</button></header>{visibleTasks.filter((task) => task.due === date).map((task) => renderTaskCard(task))}</section>) : visibleTasks.map((task) => renderTaskCard(task))}
-          {!visibleTasks.length && !(selectedProject && (projectSections[selectedProject] || []).length) && (
+          })() : renderSmartTaskList()}
+          {!displayTasks.length && !(sectionProject && (projectSections[sectionProject] || []).length) && (
             <div className="empty-state">
               <div className="empty-orbit"><span>✓</span></div>
               <h2>{selectedProject ? `${selectedProject} está vacío` : view === "completed" ? "Aún no hay tareas completadas" : "Todo despejado"}</h2>
               <p>{selectedProject ? "Añade aquí la primera tarea de este proyecto." : view === "completed" ? "Tus pequeños avances aparecerán aquí." : "Disfruta del espacio o captura lo siguiente que tengas en mente."}</p>
-              {selectedProject && !(projectSections[selectedProject] || []).length && <div className="empty-project-actions"><button className="empty-voice" onClick={openRamble}><span>≋</span> Hablar</button><button className="empty-add" onClick={() => { setComposerSection(undefined); setShowComposer(true); }}>＋ Escribir</button></div>}
+              {sectionProject && !(projectSections[sectionProject] || []).length && <div className="empty-project-actions"><button className="empty-voice" onClick={openRamble}><span>≋</span> Hablar</button><button className="empty-add" onClick={() => { setComposerSection(undefined); setShowComposer(true); }}>＋ Escribir</button></div>}
             </div>
           )}
         </div>
         </>
         )}
       </section>
+
+      {dragState?.active && draggedTask && <><div className="drag-card-ghost" style={{ transform: `translate3d(${dragState.x + 12}px, ${dragState.y + 12}px, 0)` }}><strong>{draggedTask.title}</strong><small>{dragState.overProject || draggedTask.project}{dragState.overSection ? ` / ${dragState.overSection}` : ""}</small></div><div className="drag-destination-dock" aria-label="Destinos para mover la tarea"><header><strong>Mover a…</strong><span>Arrastra y suelta</span></header><div className="drag-destination-scroll">{projects.filter((project) => !projectDetails[project]?.archived).map((project) => <div className={`drag-project-target ${dragState.overProject === project && dragState.overSection === undefined ? "active" : ""}`} data-project-drop={project} key={project}><strong>{project}</strong><div>{(projectSections[project] || []).map((section) => <span className={dragState.overProject === project && dragState.overSection === section ? "active" : ""} data-project-drop={project} data-section-drop={section} key={section}>{section}</span>)}</div></div>)}</div></div></>}
 
       <button className="ramble-fab" onClick={openRamble} aria-label="Descarga mental"><span className="pulse" /><span className="wave">≋</span></button>
       <button className="add-fab" onClick={() => { setComposerSection(undefined); setComposerDue(view === "today" ? todayISO() : view === "upcoming" ? selectedUpcomingDate : undefined); setShowComposer(true); }} aria-label="Añadir tarea">+</button>
@@ -1425,6 +1547,8 @@ export default function Home() {
         <button className={view === "upcoming" && !selectedProject && !selectedLabel && !selectedFilter && !selectedSavedFilter && !searchQuery ? "active" : ""} onClick={() => changeView("upcoming")}><span className="nav-icon">▦</span><span>Próximo</span></button>
         <button className={view === "browse" ? "active" : ""} onClick={() => changeView("browse")}><span className="browse-nav-icon"><i /><i /><i /></span><span>Explorar</span></button>
       </nav>
+
+      {selectionMode && <div className="bulk-task-toolbar"><header><strong>{selectedTaskIds.length} seleccionadas</strong><button onClick={toggleSelectionMode}>×</button></header><div><select value={bulkProject} onChange={(event) => setBulkProject(event.target.value)}>{projects.filter((project) => !projectDetails[project]?.archived).map((project) => <option key={project}>{project}</option>)}</select><button onClick={moveSelectedTasks} disabled={!selectedTaskIds.length}>Mover</button><button onClick={completeSelectedTasks} disabled={!selectedTaskIds.length}>✓</button><button className="danger" onClick={deleteSelectedTasks} disabled={!selectedTaskIds.length}>×</button></div></div>}
 
       {showInstallHelp && (
         <div className="sheet-backdrop" onMouseDown={(event) => event.target === event.currentTarget && setShowInstallHelp(false)}>
@@ -1467,9 +1591,9 @@ export default function Home() {
         <div className="sheet-backdrop section-dialog-backdrop" onMouseDown={(event) => event.target === event.currentTarget && setSectionDialog(null)}>
           <section className="section-dialog sheet" aria-label={sectionDialog.mode === "create" ? "Crear sección" : sectionDialog.mode === "move" ? "Mover sección" : "Editar sección"}>
             <div className="sheet-handle" />
-            <div className="section-dialog-heading"><div><p>Proyecto · {selectedProject}</p><h2>{sectionDialog.mode === "create" ? "Nueva sección" : sectionDialog.mode === "move" ? `Mover ${sectionDialog.section}` : "Editar sección"}</h2></div><button onClick={() => setSectionDialog(null)} aria-label="Cerrar">×</button></div>
-            {sectionDialog.mode === "move" ? <label>Proyecto de destino<select autoFocus value={sectionDialog.targetProject} onChange={(event) => setSectionDialog((current) => current ? { ...current, targetProject: event.target.value } : current)}>{projects.filter((project) => project !== selectedProject && project !== "Bandeja de entrada" && !projectDetails[project]?.archived).map((project) => <option key={project}>{project}</option>)}</select></label> : <><label>Nombre<input autoFocus value={sectionDialog.name} maxLength={120} onChange={(event) => setSectionDialog((current) => current ? { ...current, name: event.target.value } : current)} onKeyDown={(event) => event.key === "Enter" && saveSectionDialog()} placeholder="Ej. En progreso" /></label><label>Descripción<textarea value={sectionDialog.description} onChange={(event) => setSectionDialog((current) => current ? { ...current, description: event.target.value } : current)} placeholder="Contexto breve para esta fase" /></label></>}
-            <div className="section-dialog-actions"><button onClick={() => setSectionDialog(null)}>Cancelar</button><button className="confirm-btn" onClick={saveSectionDialog} disabled={sectionDialog.mode === "move" ? !sectionDialog.targetProject || sectionDialog.targetProject === selectedProject : !sectionDialog.name.trim()}>{sectionDialog.mode === "move" ? "Mover sección" : sectionDialog.mode === "create" ? "Añadir sección" : "Guardar"}</button></div>
+            <div className="section-dialog-heading"><div><p>Proyecto · {sectionDialog.project}</p><h2>{sectionDialog.mode === "create" ? "Nueva sección" : sectionDialog.mode === "move" ? `Mover ${sectionDialog.section}` : "Editar sección"}</h2></div><button onClick={() => setSectionDialog(null)} aria-label="Cerrar">×</button></div>
+            {sectionDialog.mode === "move" ? <label>Proyecto de destino<select autoFocus value={sectionDialog.targetProject} onChange={(event) => setSectionDialog((current) => current ? { ...current, targetProject: event.target.value } : current)}>{projects.filter((project) => project !== sectionDialog.project && !projectDetails[project]?.archived).map((project) => <option key={project}>{project}</option>)}</select></label> : <>{sectionDialog.mode === "create" && <label>Proyecto<select value={sectionDialog.project} onChange={(event) => setSectionDialog((current) => current ? { ...current, project: event.target.value } : current)}>{projects.filter((project) => !projectDetails[project]?.archived).map((project) => <option key={project}>{project}</option>)}</select></label>}<label>Nombre<input autoFocus value={sectionDialog.name} maxLength={120} onChange={(event) => setSectionDialog((current) => current ? { ...current, name: event.target.value } : current)} onKeyDown={(event) => event.key === "Enter" && saveSectionDialog()} placeholder="Ej. En progreso" /></label><label>Descripción<textarea value={sectionDialog.description} onChange={(event) => setSectionDialog((current) => current ? { ...current, description: event.target.value } : current)} placeholder="Contexto breve para esta fase" /></label></>}
+            <div className="section-dialog-actions"><button onClick={() => setSectionDialog(null)}>Cancelar</button><button className="confirm-btn" onClick={saveSectionDialog} disabled={sectionDialog.mode === "move" ? !sectionDialog.targetProject || sectionDialog.targetProject === sectionDialog.project : !sectionDialog.name.trim()}>{sectionDialog.mode === "move" ? "Mover sección" : sectionDialog.mode === "create" ? "Añadir sección" : "Guardar"}</button></div>
           </section>
         </div>
       )}
